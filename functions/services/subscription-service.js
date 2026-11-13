@@ -11,6 +11,7 @@ import { runOperatorChain } from '../utils/operator-runner.js';
 import { createTimeoutFetch } from '../modules/utils.js';
 import { assertPublicNetworkUrl, redactErrorMessage } from '../modules/security-utils.js';
 import { filterNodesBySelection } from '../modules/utils/node-fingerprint.js';
+import { hasEnabledRenameOperator } from '../modules/subscription/source-operators.js';
 
 /**
  * 订阅获取配置常量
@@ -443,6 +444,23 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
             return cached?.nodes || [];
         };
 
+        // 订阅源级 rename 会完全接管节点名称，此时跳过机场名称前缀，
+        // 保证正式输出与订阅源预览、订阅组预览一致。
+        const sourceHasRename = hasEnabledRenameOperator(sub);
+        const shouldPrependSubscriptions = profilePrefixSettings?.enableSubscriptions ?? true;
+        const shouldAddSubPrefix = shouldPrependSubscriptions && !skipPrefixDueToRenaming && !sourceHasRename;
+        const applySourcePrefix = (nodes) => (shouldAddSubPrefix && sub.name)
+            ? nodes.map(node => prependNodeName(node, sub.name)).join('\n')
+            : nodes.join('\n');
+        const finalizeCachedNodes = async (nodes) => {
+            try {
+                return applySourcePrefix(await applySubscriptionTransforms(nodes, sub));
+            } catch (error) {
+                console.warn('[Subscription] Failed to apply operators to cached nodes:', error?.message || error);
+                return nodes.join('\n');
+            }
+        };
+
         try {
             const customUserAgent = typeof sub.customUserAgent === 'string' ? sub.customUserAgent.trim() : '';
             const processedUserAgent = customUserAgent || getProcessedUserAgent(userAgent, sub.url);
@@ -482,7 +500,7 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
 
             if (!response.ok) {
                 recordEmptyRuntimeInfo();
-                return (await readCachedNodes()).join('\n');
+                return finalizeCachedNodes(await readCachedNodes());
             }
             const buffer = await response.arrayBuffer();
             let text = new TextDecoder('utf-8').decode(buffer);
@@ -506,19 +524,22 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
             // Profile 子集必须在任何重命名、前缀和协议渲染前过滤。
             validNodes = await filterNodesBySelection(validNodes, sub.nodeSelection);
 
+            // 节点缓存只保存原始 URL，避免订阅源级改名结果被固化进缓存。
+            const cacheableNodes = validNodes.filter(isRealProxyNode);
+
             // --- 统一转换治理 (算子 + 过滤 + 组级诊断) ---
             validNodes = await applySubscriptionTransforms(validNodes, sub);
 
             const realNodes = validNodes.filter(isRealProxyNode);
             if (cacheEnabled && realNodes.length === 0) {
-                return (await readCachedNodes()).join('\n');
+                return finalizeCachedNodes(await readCachedNodes());
             }
             if (!cacheEnabled && realNodes.length === 0) {
                 recordEmptyRuntimeInfo();
             }
 
             if (cacheEnabled && !managedDeploymentSnapshot) {
-                await writeSubscriptionNodeCache(storage, sub, realNodes);
+                await writeSubscriptionNodeCache(storage, sub, cacheableNodes);
             }
 
             if (realNodes.length > 0) {
@@ -535,15 +556,10 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
             }
 
             // 判断是否启用订阅前缀（智能重命名启用时跳过）
-            const shouldPrependSubscriptions = profilePrefixSettings?.enableSubscriptions ?? true;
-            const shouldAddSubPrefix = shouldPrependSubscriptions && !skipPrefixDueToRenaming;
-
-            return (shouldAddSubPrefix && sub.name)
-                ? validNodes.map(node => prependNodeName(node, sub.name)).join('\n')
-                : validNodes.join('\n');
+            return applySourcePrefix(validNodes);
         } catch (e) {
             recordEmptyRuntimeInfo();
-            return (await readCachedNodes()).join('\n');
+            return finalizeCachedNodes(await readCachedNodes());
         }
     };
 

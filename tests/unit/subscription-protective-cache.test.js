@@ -209,6 +209,70 @@ describe('subscription protective node cache', () => {
         expect(storedSubscription).not.toHaveProperty('userInfo');
     });
 
+    it('applies source operators to cached fallback nodes', async () => {
+        const cacheKey = buildSubscriptionNodeCacheKey({ id: 'sub-a', url: 'https://example.com/sub' });
+        const storage = createMemoryStorage({
+            [cacheKey]: {
+                nodes: ['trojan://cached@example.com:443#HK'],
+                nodeCount: 1,
+                updatedAt: '2026-01-01T00:00:00.000Z'
+            }
+        });
+        vi.stubGlobal('fetch', vi.fn(async () => new Response('Forbidden', { status: 403 })));
+
+        const result = await generateCombinedNodeList(
+            { storage },
+            { enableAccessLog: false, enableFlagEmoji: false },
+            'ClashMeta',
+            [{
+                id: 'sub-a',
+                name: '机场A',
+                url: 'https://example.com/sub',
+                enabled: true,
+                enableNodeCache: true,
+                operators: [{
+                    type: 'rename',
+                    enabled: true,
+                    params: { regex: { enabled: true, rules: [{ pattern: 'HK', replacement: 'Hong Kong' }] } }
+                }]
+            }],
+            '',
+            { enableSubscriptions: false },
+            false
+        );
+
+        expect(decodeURIComponent(result.trim())).toBe('trojan://cached@example.com:443#Hong Kong');
+    });
+
+    it('skips the subscription name prefix when source rename is enabled', async () => {
+        const storage = createMemoryStorage();
+        vi.stubGlobal('fetch', vi.fn(async () => new Response('trojan://pass@example.com:443#HK', { status: 200 })));
+
+        const result = await generateCombinedNodeList(
+            { storage },
+            { enableAccessLog: false, enableFlagEmoji: false },
+            'ClashMeta',
+            [{
+                id: 'sub-a',
+                name: '机场A',
+                url: 'https://example.com/sub',
+                enabled: true,
+                operators: [{
+                    type: 'rename',
+                    enabled: true,
+                    params: { template: { enabled: true, template: '{regionZh}-{index:2}', indexScope: 'global' } }
+                }]
+            }],
+            '',
+            { enableSubscriptions: true },
+            false
+        );
+
+        const decoded = decodeURIComponent(result.trim());
+        expect(decoded).not.toContain('机场A');
+        expect(decoded).toMatch(/-\d{2}$/);
+    });
+
     it('enableNodeCache 关闭时，拉取失败不使用旧缓存', async () => {
         const storage = createMemoryStorage({
             [buildSubscriptionNodeCacheKey({ id: 'sub-a', url: 'https://example.com/sub' })]: {

@@ -8,6 +8,7 @@ import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS, DEFAULT_SETTINGS } from 
 import { fetchSubscriptionNodes } from './node-fetcher.js';
 import { applyManualNodeName } from '../utils/node-cleaner.js';
 import { filterNodesBySelection } from '../utils/node-fingerprint.js';
+import { applySubscriptionOperators } from './source-operators.js';
 
 function ensureArray(data) {
     if (!data) return [];
@@ -139,31 +140,45 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
     // 处理手工节点（直接解析节点URL）
     // 先将用户自定义名称写入 URL（与订阅生成流程保持一致），
     // 确保 parseNodeInfo 和节点转换管道能基于正确名称工作
-    const manualNodeResults = targetManualNodes.map(node => {
+    const manualNodeResults = await Promise.all(targetManualNodes.map(async node => {
         const customName = typeof node.name === 'string' ? node.name.trim() : '';
         const effectiveUrl = customName ? applyManualNodeName(node.url, customName) : node.url;
 
-        const nodeInfo = parseNodeInfo(effectiveUrl);
+        const operatedNodes = await applySubscriptionOperators([{
+            ...parseNodeInfo(effectiveUrl),
+            url: effectiveUrl,
+            subscriptionName: node.name || '手工节点',
+            group: node.group || ''
+        }], node, { config: settings, userAgent });
+        const primaryNode = operatedNodes[0] || {};
+        const finalUrl = primaryNode.url || effectiveUrl;
+
         return {
             subscriptionName: node.name || '手工节点',
             group: node.group || '',
-            url: effectiveUrl,
+            url: finalUrl,
             success: true,
-            nodes: [{
-                ...nodeInfo,
-                url: effectiveUrl,
+            nodes: operatedNodes.map(item => ({
+                ...item,
                 subscriptionName: node.name || '手工节点',
                 group: node.group || ''
-            }],
+            })),
             error: null,
             isManualNode: true
         };
-    });
+    }));
 
     // 并行获取HTTP订阅节点
     const subscriptionResults = await Promise.all(targetSubscriptions.map(async sub => {
         const result = await fetchSubscriptionNodes(sub.url, sub.name, userAgent, sub.customUserAgent, false, sub.exclude, sub.fetchProxy, skipCertVerify, Boolean(sub?.plusAsSpace), sub?.enableNodeCache === true);
-        if (result?.success && Array.isArray(result.nodes)) result.nodes = await filterNodesBySelection(result.nodes, sub.nodeSelection);
+        if (result?.success && Array.isArray(result.nodes)) {
+            result.nodes = await filterNodesBySelection(result.nodes, sub.nodeSelection);
+            // 先执行订阅源级算子，再交给订阅组级算子，顺序与正式生成一致
+            result.nodes = await applySubscriptionOperators(result.nodes, sub, {
+                config: settings,
+                userAgent
+            });
+        }
         return result;
     }));
 

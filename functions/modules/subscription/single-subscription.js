@@ -2,9 +2,10 @@ import { StorageFactory } from '../../storage-adapter.js';
 import { createJsonResponse } from '../utils.js';
 import { parseNodeInfo } from '../utils/geo-utils.js';
 import { calculateProtocolStats, calculateRegionStats } from '../utils/node-parser.js';
-import { KV_KEY_SUBS } from '../config.js';
+import { KV_KEY_SUBS, KV_KEY_SETTINGS, DEFAULT_SETTINGS } from '../config.js';
 import { fetchSubscriptionNodes } from './node-fetcher.js';
 import { writeSubscriptionNodeCache } from '../../services/subscription-service.js';
+import { applySubscriptionOperators } from './source-operators.js';
 
 /**
  * 处理单个订阅模式的节点获取
@@ -14,7 +15,7 @@ import { writeSubscriptionNodeCache } from '../../services/subscription-service.
  * @param {string} userAgent - 用户代理
  * @returns {Promise<Object>} 处理结果
  */
-export async function handleSingleSubscriptionMode(request, env, subscriptionId, userAgent, skipCertVerify = false) {
+export async function handleSingleSubscriptionMode(request, env, subscriptionId, userAgent, skipCertVerify = false, applySourceOperators = true) {
     const storageAdapter = StorageFactory.createAdapter(env, await StorageFactory.getStorageType(env));
 
     // 查找订阅
@@ -26,18 +27,27 @@ export async function handleSingleSubscriptionMode(request, env, subscriptionId,
         return createJsonResponse({ error: '订阅不存在或已禁用' }, 404);
     }
 
+    // 与正式生成保持一致：算子上下文使用 Worker 全局设置
+    const settings = typeof storageAdapter.get === 'function'
+        ? (await storageAdapter.get(KV_KEY_SETTINGS) || DEFAULT_SETTINGS)
+        : DEFAULT_SETTINGS;
+
     // 检查是否为手工节点
     if (!subscription.url.startsWith('http')) {
         // 手工节点：直接解析节点URL
         const nodeInfo = parseNodeInfo(subscription.url);
+        const manualNodes = applySourceOperators
+            ? await applySubscriptionOperators([{
+                ...nodeInfo,
+                url: subscription.url,
+                subscriptionName: subscription.name || '手工节点'
+            }], subscription, { config: settings, userAgent })
+            : [{ ...nodeInfo, url: subscription.url, subscriptionName: subscription.name || '手工节点' }];
         const manualNodeResult = {
             subscriptionName: subscription.name || '手工节点',
             url: subscription.url,
             success: true,
-            nodes: [{
-                ...nodeInfo,
-                subscriptionName: subscription.name || '手工节点'
-            }],
+            nodes: manualNodes,
             error: null,
             isManualNode: true
         };
@@ -48,8 +58,8 @@ export async function handleSingleSubscriptionMode(request, env, subscriptionId,
             nodes: manualNodeResult.nodes,
             totalCount: manualNodeResult.nodes.length,
             stats: {
-                protocols: { [nodeInfo.protocol]: 1 },
-                regions: { [nodeInfo.region || '其他']: 1 }
+                protocols: calculateProtocolStats(manualNodeResult.nodes),
+                regions: calculateRegionStats(manualNodeResult.nodes)
             }
         };
     }
@@ -65,14 +75,23 @@ export async function handleSingleSubscriptionMode(request, env, subscriptionId,
         }
     }
 
+    // 订阅源级 rename 只在输出阶段执行，且与正式生成使用相同的算子上下文。
+    // 节点选择器等需要原始节点指纹的调用方可以显式传 applyTransform=false。
+    const transformedNodes = applySourceOperators
+        ? await applySubscriptionOperators(result.nodes, subscription, {
+            config: settings,
+            userAgent
+        })
+        : result.nodes;
+
     return {
         success: true,
-        subscriptions: [result],
-        nodes: result.nodes,
-        totalCount: result.nodes.length,
+        subscriptions: [{ ...result, nodes: transformedNodes }],
+        nodes: transformedNodes,
+        totalCount: transformedNodes.length,
         stats: {
-            protocols: calculateProtocolStats(result.nodes),
-            regions: calculateRegionStats(result.nodes)
+            protocols: calculateProtocolStats(transformedNodes),
+            regions: calculateRegionStats(transformedNodes)
         }
     };
 }

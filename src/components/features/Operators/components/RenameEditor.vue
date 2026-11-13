@@ -19,7 +19,7 @@ const updateParam = (key, value) => {
 };
 
 const updateTemplate = (updates) => {
-  const current = props.modelValue.template || { enabled: false, template: '', offset: 1 };
+  const current = props.modelValue.template || { enabled: false, template: '', offset: 1, indexScope: 'region' };
   updateParam('template', { ...current, ...updates });
 };
 
@@ -179,15 +179,31 @@ const applyPresetRegex = (rule) => {
             </div>
           </div>
           
-          <div class="flex items-center gap-2 mt-3 pt-3 border-t border-teal-100/20">
-            <span class="text-[10px] text-teal-600/60 font-medium">{{ t('operators.startIndex') }}</span>
-            <input 
-              :value="props.modelValue.template.offset || 1"
-              @input="(e) => updateTemplate({ offset: parseInt(e.target.value) || 1 })"
-              type="number"
-              class="w-14 px-2 py-1 text-[10px] rounded bg-white dark:bg-gray-800 border border-teal-100/30 outline-none"
-            />
+          <div class="flex flex-wrap items-center gap-3 mt-3 pt-3 border-t border-teal-100/20">
+            <div class="flex items-center gap-2">
+              <span class="text-[10px] text-teal-600/60 font-medium">{{ t('operators.startIndex') }}</span>
+              <input
+                :value="props.modelValue.template.offset || 1"
+                @input="(e) => updateTemplate({ offset: parseInt(e.target.value) || 1 })"
+                type="number"
+                class="w-14 px-2 py-1 text-[10px] rounded bg-white dark:bg-gray-800 border border-teal-100/30 outline-none"
+              />
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="text-[10px] text-teal-600/60 font-medium">{{ t('operators.indexScope') }}</span>
+              <select
+                :value="props.modelValue.template.indexScope || 'region'"
+                @change="(e) => updateTemplate({ indexScope: e.target.value })"
+                class="px-2 py-1 text-[10px] rounded bg-white dark:bg-gray-800 border border-teal-100/30 outline-none"
+              >
+                <option value="region">{{ t('operators.indexScopeRegion') }}</option>
+                <option value="protocol">{{ t('operators.indexScopeProtocol') }}</option>
+                <option value="regionProtocol">{{ t('operators.indexScopeRegionProtocol') }}</option>
+                <option value="global">{{ t('operators.indexScopeGlobal') }}</option>
+              </select>
+            </div>
           </div>
+          <p class="mt-2 text-[9px] text-teal-600/50">{{ t('operators.indexScopeHint') }}</p>
         </div>
       </div>
     </div>

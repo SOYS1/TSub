@@ -15,6 +15,11 @@ const props = defineProps({
   legacyData: {
     type: Object,
     default: null
+  },
+  // 限制可添加的算子类型；为空时保持原有全类型行为
+  allowedTypes: {
+    type: Array,
+    default: null
   }
 });
 
@@ -127,7 +132,13 @@ const toggleOperator = (event, index) => {
 };
 
 const operatorLabel = (type) => t(`operators.${type}`);
-const operatorTypes = ['filter', 'rename', 'script', 'sort', 'dedup'];
+const ALL_OPERATOR_TYPES = ['filter', 'rename', 'script', 'sort', 'dedup'];
+const operatorTypes = computed(() => {
+  if (!Array.isArray(props.allowedTypes) || props.allowedTypes.length === 0) {
+    return ALL_OPERATOR_TYPES;
+  }
+  return ALL_OPERATOR_TYPES.filter(type => props.allowedTypes.includes(type));
+});
 
 const getOperatorIcon = (type) => {
     switch (type) {

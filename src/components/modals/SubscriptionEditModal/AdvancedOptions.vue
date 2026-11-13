@@ -1,7 +1,9 @@
 <script setup>
+import { computed, ref } from 'vue';
 import Switch from '../../ui/Switch.vue';
 import { useI18n } from '../../../i18n/index.js';
 import TrafficQuotaField from './TrafficQuotaField.vue';
+import OperatorChain from '../../features/Operators/OperatorChain.vue';
 
 const { t } = useI18n();
 
@@ -12,6 +14,18 @@ const props = defineProps({
   },
   managed: Boolean
 });
+
+const isOperatorsExpanded = ref(false);
+
+const sourceOperators = computed({
+  get: () => (Array.isArray(props.editingSubscription?.operators) ? props.editingSubscription.operators : []),
+  set: (value) => {
+    if (!props.editingSubscription) return;
+    props.editingSubscription.operators = Array.isArray(value) ? value : [];
+  }
+});
+
+const sourceOperatorCount = computed(() => sourceOperators.value.length);
 </script>
 
 <template>
@@ -87,6 +101,42 @@ const props = defineProps({
         <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{{ t('subscriptions.excludeTrafficDesc') }}</p>
       </div>
       <Switch v-model="editingSubscription.excludeTraffic" />
+    </div>
+  </div>
+
+  <!-- 订阅源级节点名称规则 -->
+  <div v-if="!managed" class="pt-3 border-t border-gray-100 dark:border-gray-700">
+    <button
+      type="button"
+      class="flex w-full items-start justify-between gap-3 text-left"
+      @click="isOperatorsExpanded = !isOperatorsExpanded"
+    >
+      <div>
+        <span class="text-sm font-medium text-gray-700 dark:text-gray-200">{{ t('subscriptions.sourceOperatorsTitle') }}</span>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{{ t('subscriptions.sourceOperatorsDesc') }}</p>
+      </div>
+      <div class="flex shrink-0 items-center gap-2">
+        <span class="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-400">
+          {{ t('subscriptions.sourceOperatorsCount', { count: sourceOperatorCount }) }}
+        </span>
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          class="h-4 w-4 text-gray-400 transition-transform duration-200"
+          :class="{ 'rotate-180': isOperatorsExpanded }"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+        >
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+        </svg>
+      </div>
+    </button>
+
+    <div v-if="isOperatorsExpanded" class="mt-3">
+      <p class="mb-3 rounded-xl bg-gray-50 px-3 py-2 text-[11px] text-gray-500 dark:bg-gray-900/40 dark:text-gray-400">
+        {{ t('subscriptions.sourceOperatorsHint') }}
+      </p>
+      <OperatorChain v-model="sourceOperators" :allowed-types="['rename']" />
     </div>
   </div>
 </template>

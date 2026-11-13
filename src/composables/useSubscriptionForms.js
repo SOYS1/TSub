@@ -22,6 +22,19 @@ function stripTrafficQuotaForm(subscription) {
     return cleaned;
 }
 
+function normalizeOperators(value) {
+    if (Array.isArray(value)) return value;
+    if (typeof value === 'string') {
+        try {
+            const parsed = JSON.parse(value);
+            return Array.isArray(parsed) ? parsed : [];
+        } catch {
+            return [];
+        }
+    }
+    return [];
+}
+
 export function useSubscriptionForms({ addSubscription, updateSubscription }) {
     const { showToast } = useToastStore();
     const showModal = ref(false);
@@ -41,7 +54,8 @@ export function useSubscriptionForms({ addSubscription, updateSubscription }) {
             plusAsSpace: false,
             excludeTraffic: false,
             website: '',
-            notes: ''
+            notes: '',
+            operators: []
         });
         showModal.value = true;
     };
@@ -58,6 +72,7 @@ export function useSubscriptionForms({ addSubscription, updateSubscription }) {
         // Deep copy to avoid mutating store state directly before save
         try {
             editingSubscription.value = attachTrafficQuotaForm(JSON.parse(JSON.stringify(sub)));
+            editingSubscription.value.operators = normalizeOperators(editingSubscription.value.operators);
             if (isDev) {
                 console.debug('UseSubscriptionForms: editingSubscription set to', editingSubscription.value);
             }
@@ -81,6 +96,7 @@ export function useSubscriptionForms({ addSubscription, updateSubscription }) {
             showToast(t('subscriptions.trafficQuotaInvalid'), 'error');
             return;
         }
+        cleanedSubscription.operators = normalizeOperators(cleanedSubscription.operators);
 
         if (isNew.value) {
             addSubscription({ ...cleanedSubscription, id: generateSubscriptionId() });

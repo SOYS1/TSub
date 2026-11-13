@@ -108,7 +108,8 @@ export async function handleSubscriptionNodesRequest(request, env) {
                 result = await handleProfileMode(request, env, profileId, userAgent, requestData.applyTransform !== undefined ? requestData.applyTransform : true, skipCertVerify);
                 break;
             case 'subscription':
-                result = await handleSingleSubscriptionMode(request, env, subscriptionId, userAgent, skipCertVerify);
+                // 订阅源预览默认应用源级算子；节点选择器会显式传 applyTransform=false 获取原始指纹。
+                result = await handleSingleSubscriptionMode(request, env, subscriptionId, userAgent, skipCertVerify, requestData.applyTransform !== false);
                 break;
             case 'direct':
                 result = await handleDirectUrlMode(subscriptionUrl, userAgent, skipCertVerify, plusAsSpace);
