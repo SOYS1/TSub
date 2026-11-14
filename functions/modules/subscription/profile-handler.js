@@ -203,7 +203,18 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
 
     if (applyTransform) {
         const nodeUrls = allNodes.map(node => node.url);
-        const nodeMetadataByUrl = new Map(allNodes.map(node => [node.url, { group: node.group || '' }]));
+        const nodeMetadataByUrl = new Map();
+        for (const node of allNodes) {
+            if (!node?.url) continue;
+            const extra = {
+                group: node.group || '',
+                ...(node.metadata ? { metadata: node.metadata } : {})
+            };
+            nodeMetadataByUrl.set(node.url, extra);
+            if (node.server) {
+                nodeMetadataByUrl.set(`${node.server}:${node.port ?? ''}`, extra);
+            }
+        }
 
         let activeOperators = ensureArray(profile?.operators);
         if (!activeOperators.length && profile?.nodeTransform?.enabled && profile.nodeTransform?.operators) {
@@ -252,9 +263,15 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
                 }
             });
             const record = transformedRecords?.[index];
+            // 合并而不是覆盖：record.metadata 含算子链最新测速结果，
+            // originalNode.metadata 保留订阅源阶段产生的字段。
+            const metadata = {
+                ...(originalNode?.metadata || {}),
+                ...(record?.metadata || {})
+            };
             return {
                 ...nodeInfo,
-                ...(record?.metadata ? { metadata: record.metadata } : {}),
+                ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
                 subscriptionName: originalNode?.subscriptionName || nodeInfo.subscriptionName || '未知'
             };
         });

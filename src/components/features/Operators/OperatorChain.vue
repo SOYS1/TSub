@@ -1,6 +1,7 @@
 <script setup>
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { useI18n } from '../../../i18n/index.js';
+import { loadRuntimeCapabilities, resolveSpeedTestSupport } from '../../../lib/runtime-capabilities.js';
 import FilterEditor from './components/FilterEditor.vue';
 import RenameEditor from './components/RenameEditor.vue';
 import SortEditor from './components/SortEditor.vue';
@@ -79,6 +80,37 @@ const migrateFromLegacy = () => {
 // Track which operator is expanded
 const expandedIndex = ref(props.modelValue.length > 0 ? props.modelValue.length - 1 : null);
 
+/**
+ * Speed-test capabilities of the current deployment. Cloudflare Pages can only
+ * run TCP ping, so real ping / download options must never be saved there.
+ * This lives in the chain (not the editor) because the editor is only mounted
+ * while its card is expanded.
+ */
+const speedTestSupport = ref(null);
+
+const normalizeSpeedTestOperators = () => {
+  const support = speedTestSupport.value;
+  if (!support || support.realPing) return;
+  let changed = false;
+  const next = props.modelValue.map((op) => {
+    if (op?.type !== 'speedtest') return op;
+    const params = op.params || {};
+    if (params.testMode === 'tcp' && params.enableSpeedTest !== true) return op;
+    changed = true;
+    return { ...op, params: { ...params, testMode: 'tcp', enableSpeedTest: false } };
+  });
+  if (changed) emit('update:modelValue', next);
+};
+
+onMounted(async () => {
+  const capabilities = await loadRuntimeCapabilities();
+  if (!capabilities) return;
+  speedTestSupport.value = resolveSpeedTestSupport(capabilities);
+  normalizeSpeedTestOperators();
+});
+
+watch(() => props.modelValue, () => normalizeSpeedTestOperators(), { deep: true });
+
 const toggleExpand = (index) => {
   expandedIndex.value = expandedIndex.value === index ? null : index;
 };
@@ -104,7 +136,7 @@ const getInitialParams = (type) => {
     case 'sort': return { keys: [{ key: 'region', order: 'asc', customOrder: ['香港', '台湾', '日本', '新加坡', '美国', '韩国', '英国', '德国', '法国', '加拿大'] }] };
     case 'dedup': return { mode: 'serverPort', includeProtocol: true, prefer: { protocolOrder: [] } };
     case 'speedtest': return {
-      testMode: 'real',
+      testMode: speedTestSupport.value?.realPing === false ? 'tcp' : 'real',
       pingUrl: 'http://cp.cloudflare.com/generate_204',
       enableSpeedTest: false,
       speedTestUrl: 'https://speed.cloudflare.com/__down?bytes=10000000',

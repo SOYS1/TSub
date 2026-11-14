@@ -35,7 +35,14 @@ export async function getPlatformCapabilities(env = {}) {
       remoteAgent: fullMode,
       remoteCommands: fullMode,
       heartbeats: fullMode,
-      localExecutor
+      localExecutor,
+      // Layer capabilities of the speed-test operator. Real ping / download
+      // need a local proxy core, which only the self-hosted controller has.
+      speedTest: {
+        tcpPing: true,
+        realPing: platform === PLATFORM_TYPES.SERVER,
+        download: platform === PLATFORM_TYPES.SERVER
+      }
     },
     database: {
       switchTargets: platform === PLATFORM_TYPES.SERVER

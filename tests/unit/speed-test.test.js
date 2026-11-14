@@ -1,11 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  CLOUDFLARE_REAL_PING_ERROR,
   DEFAULT_SPEED_TEST_PARAMS,
+  isCloudflareRuntime,
   normalizeSpeedTestParams,
   runSpeedTestOperator
 } from '../../functions/utils/speed-test.js';
 import { runOperatorChain } from '../../functions/utils/operator-runner.js';
 import { applySubscriptionOperators } from '../../functions/modules/subscription/source-operators.js';
+import { generateCombinedNodeList } from '../../functions/services/subscription-service.js';
 
 function node(server, port = 443) {
   return {
@@ -27,6 +30,10 @@ function runnerFor(handlers) {
 }
 
 describe('speed test operator', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('uses layered real ping then download and keeps the minimum latency', async () => {
     const calls = { open: 0, ping: 0, download: 0, close: 0 };
     const runner = runnerFor({
@@ -131,6 +138,65 @@ describe('speed test operator', () => {
 
     expect(result[0].metadata.latency).toBe(-1);
     expect(result[0].metadata.latencyError).toBe('econnrefused');
+  });
+
+  it('never leaks undefined latency when the connector returns an invalid value', async () => {
+    const result = await runSpeedTestOperator([
+      node('invalid-a.example.com', 8388),
+      node('invalid-b.example.com', 8388)
+    ], { testMode: 'tcp', concurrency: 2 }, {
+      tcpConnect: async () => undefined
+    });
+
+    for (const record of result) {
+      expect(typeof record.metadata.latency).toBe('number');
+      expect(record.metadata.latency).toBe(-1);
+      expect(record.metadata.latencyError).toBe('tcp_invalid_latency');
+    }
+  });
+
+  it('marks every node with latency -1 when Cloudflare sockets are unavailable', async () => {
+    // Force Cloudflare runtime detection; the test environment cannot resolve
+    // `cloudflare:sockets`, which must degrade to -1 instead of throwing.
+    vi.stubGlobal('navigator', { userAgent: 'Cloudflare-Workers' });
+    expect(isCloudflareRuntime()).toBe(true);
+
+    const result = await runSpeedTestOperator([
+      node('cf-a.example.com', 443),
+      node('cf-b.example.com', 443)
+    ], { testMode: 'tcp', concurrency: 2 });
+
+    expect(result).toHaveLength(2);
+    for (const record of result) {
+      expect(record.metadata.latency).toBe(-1);
+      expect(record.metadata.latencyError).toBe('tcp_unavailable');
+    }
+  });
+
+  it('fast-fails real ping on Cloudflare without spawning any work', async () => {
+    vi.stubGlobal('navigator', { userAgent: 'Cloudflare-Workers' });
+    let runnerOpened = false;
+
+    const result = await runSpeedTestOperator([node('cf-real.example.com')], {
+      testMode: 'real',
+      enableSpeedTest: true,
+      timeout: 30000
+    }, {
+      speedTestRunner: null,
+      tcpConnect: async () => {
+        runnerOpened = true;
+        return 10;
+      }
+    });
+
+    expect(runnerOpened).toBe(false);
+    expect(result[0].metadata).toMatchObject({
+      latency: -1,
+      speed: 0,
+      speedTestMode: 'real',
+      latencyError: CLOUDFLARE_REAL_PING_ERROR,
+      speedError: CLOUDFLARE_REAL_PING_ERROR
+    });
   });
 
   it('isolates failures between nodes', async () => {
@@ -257,6 +323,69 @@ describe('filter performance thresholds', () => {
     expect(result[0].subscriptionName).toBe('Airport');
   });
 
+  it('accepts records as chain input so a filter-only chain can read latency', async () => {
+    const records = [
+      { ...node('keep.example.com'), metadata: { latency: 40 } },
+      { ...node('drop.example.com'), metadata: { latency: 900 } }
+    ];
+
+    const result = await runOperatorChain(records, [
+      { type: 'filter', params: { maxLatency: 200 } }
+    ], { returnRecords: true });
+
+    expect(result).toHaveLength(1);
+    expect(result[0].server).toBe('keep.example.com');
+    expect(result[0].metadata.latency).toBe(40);
+  });
+
+  it('keeps a zero latency node even when speed metadata is missing', async () => {
+    const records = [
+      { ...node('zero.example.com'), metadata: { latency: 0 } },
+      { ...node('slow.example.com'), metadata: { latency: 500 } }
+    ];
+
+    const result = await runOperatorChain(records, [
+      { type: 'filter', params: { maxLatency: 200 } }
+    ], { returnRecords: true });
+
+    expect(result).toHaveLength(1);
+    expect(result[0].server).toBe('zero.example.com');
+    expect(result[0].metadata.latency).toBe(0);
+    expect(result[0].metadata.speed).toBeUndefined();
+  });
+
+  it('keeps upstream metadata through a filter-only source operator chain', async () => {
+    const result = await applySubscriptionOperators([
+      { ...node('keep.example.com'), subscriptionName: 'Airport', metadata: { latency: 30 } },
+      { ...node('drop.example.com'), subscriptionName: 'Airport', metadata: { latency: 800 } }
+    ], {
+      name: 'Airport',
+      operators: [{ type: 'filter', params: { maxLatency: 200 } }]
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0].server).toBe('keep.example.com');
+    expect(result[0].metadata.latency).toBe(30);
+    expect(result[0].subscriptionName).toBe('Airport');
+  });
+
+  it('keeps speed-test metadata when a later rename operator rewrites the name', async () => {
+    const runner = runnerFor({
+      open: async () => ({
+        async ping() { return 18; },
+        async close() {}
+      })
+    });
+
+    const records = await runOperatorChain([node('rename.example.com').url], [
+      { type: 'speedtest', params: { testMode: 'real' } },
+      { type: 'rename', params: { template: { enabled: true, template: 'Renamed {name}' } } }
+    ], { speedTestRunner: runner, returnRecords: true });
+
+    expect(records[0].name).toBe('Renamed Node rename.example.com');
+    expect(records[0].metadata.latency).toBe(18);
+  });
+
   it('can return enriched records when requested', async () => {
     const runner = runnerFor({
       open: async () => ({
@@ -270,5 +399,43 @@ describe('filter performance thresholds', () => {
     ], { speedTestRunner: runner, returnRecords: true });
 
     expect(records[0].metadata.latency).toBe(12);
+  });
+});
+
+describe('speed test metadata across generation stages', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('carries source-level TCP latency into a profile-level filter', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response([
+      'trojan://pass@fast.example.com:443#Fast',
+      'trojan://pass@slow.example.com:443#Slow'
+    ].join('\n'), { status: 200 })));
+
+    const result = await generateCombinedNodeList(
+      {
+        env: {},
+        tcpConnect: async (host) => (host.startsWith('fast') ? 50 : 900)
+      },
+      { enableAccessLog: false, enableFlagEmoji: false },
+      'ClashMeta',
+      [{
+        id: 'sub-a',
+        name: 'Airport',
+        url: 'https://example.com/sub',
+        enabled: true,
+        operators: [{ type: 'speedtest', params: { testMode: 'tcp' } }]
+      }],
+      '',
+      {
+        enableSubscriptions: false,
+        operators: [{ type: 'filter', params: { maxLatency: 200 } }]
+      },
+      false
+    );
+
+    expect(result).toContain('fast.example.com');
+    expect(result).not.toContain('slow.example.com');
   });
 });

@@ -78,13 +78,16 @@ export async function applySubscriptionOperators(nodes, subscription, options = 
     if (nodeUrls.length === 0) return nodes;
 
     try {
-        const transformedRecords = await runOperatorChain(nodeUrls, operators, {
+        // 直接传入节点对象而不是 URL 字符串：这样上游算子（例如测速）写入的
+        // metadata 会被完整保留，下游 Filter 才能读取 latency / speed。
+        const transformedRecords = await runOperatorChain(nodes, operators, {
             subName: subscription?.name,
             userAgent: options.userAgent,
             config: options.config,
             env: options.env,
             speedTestRunner: options.speedTestRunner,
             tcpConnect: options.tcpConnect,
+            nodeMetadataByUrl: options.nodeMetadataByUrl,
             returnRecords: true
         });
 
@@ -106,11 +109,19 @@ export async function applySubscriptionOperators(nodes, subscription, options = 
                 || nodes[index]
                 || nodes[0]
                 || {};
+            // 合并而不是覆盖：record 携带算子链产生的最新 metadata，
+            // fallback 保留订阅来源等外部字段。
+            const metadata = {
+                ...(fallback.metadata || {}),
+                ...(info.metadata || {}),
+                ...(record?.metadata || {})
+            };
             return {
                 ...fallback,
                 ...info,
-                metadata: record?.metadata || fallback.metadata || info.metadata,
-                url: record?.url,
+                ...(record || {}),
+                url: record?.url || info.url || fallback.url,
+                metadata,
                 subscriptionName: fallback.subscriptionName || info.subscriptionName || subscription?.name || '未知'
             };
         });

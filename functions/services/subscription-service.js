@@ -49,6 +49,44 @@ export function isRealProxyNode(node) {
     return REAL_PROXY_PROTOCOLS.some(protocol => trimmed.startsWith(protocol));
 }
 
+/**
+ * 把算子链返回的 Records 中的测速结果记录到 context 上。
+ *
+ * 订阅源级算子链最终仍以 URL 字符串形式继续参与合并，因此 metadata 无法
+ * 直接随字符串流转。这里以 URL 和 server:port 双键缓存，供后续订阅组级
+ * 算子链（尤其是 Filter）重新水合。
+ */
+function rememberOperatorMetadata(context, records) {
+    if (!context || !Array.isArray(records) || records.length === 0) return;
+
+    const existing = context.nodeMetadataByUrl;
+    const metadataMap = existing instanceof Map
+        ? existing
+        : new Map(Object.entries(existing || {}));
+
+    for (const record of records) {
+        if (!record?.metadata) continue;
+        const hasMeasurement = record.metadata.latency !== undefined || record.metadata.speed !== undefined;
+        if (!hasMeasurement) continue;
+
+        const keys = [];
+        if (record.url) keys.push(record.url);
+        if (record.server) keys.push(`${record.server}:${record.port ?? ''}`);
+
+        for (const key of keys) {
+            metadataMap.set(key, {
+                ...(metadataMap.get(key) || {}),
+                metadata: {
+                    ...((metadataMap.get(key) || {}).metadata || {}),
+                    ...record.metadata
+                }
+            });
+        }
+    }
+
+    context.nodeMetadataByUrl = metadataMap;
+}
+
 export function normalizeSubscriptionNodeCacheNodes(value) {
     let cached = value;
     for (let attempt = 0; typeof cached === 'string' && attempt < 2; attempt++) {
@@ -370,14 +408,19 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
         }
 
         if (subOperators.length > 0) {
-            currentNodes = await runOperatorChain(currentNodes, subOperators, {
+            const transformedRecords = await runOperatorChain(currentNodes, subOperators, {
                 subName: subSource?.name,
                 userAgent,
                 config,
                 env: context?.env,
                 speedTestRunner: context?.speedTestRunner,
-                tcpConnect: context?.tcpConnect
+                tcpConnect: context?.tcpConnect,
+                nodeMetadataByUrl: context?.nodeMetadataByUrl,
+                returnRecords: true
             });
+            // 订阅源级测速结果需要跨阶段保留，供订阅组级 Filter 使用。
+            rememberOperatorMetadata(context, transformedRecords);
+            currentNodes = transformedRecords.map(record => record.url);
         }
 
         // 2. 应用传统的文本过滤规则 (exclude/include)
@@ -604,14 +647,20 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
 
     // 2.1 执行 Workflow 链式处理 (算子操作)
     if (activeOperators.length > 0) {
-        currentLines = await runOperatorChain(currentLines, activeOperators, {
+        const transformedRecords = await runOperatorChain(currentLines, activeOperators, {
             subName: profilePrefixSettings?.name,
             userAgent,
             config,
             env: context?.env,
             speedTestRunner: context?.speedTestRunner,
-            tcpConnect: context?.tcpConnect
+            tcpConnect: context?.tcpConnect,
+            // 订阅源级测速得到的 metadata 以 URL / server:port 为键缓存，
+            // 在这里重新水合，避免字符串聚合阶段丢失 latency。
+            nodeMetadataByUrl: context?.nodeMetadataByUrl,
+            returnRecords: true
         });
+        rememberOperatorMetadata(context, transformedRecords);
+        currentLines = transformedRecords.map(record => record.url);
     }
 
     // 2.2 [安全保险] 再次应用订阅组级别的全局过滤逻辑 (Profile-level)
@@ -862,11 +911,15 @@ async function applySubscriptionTransforms(nodeUrls, sub, context = null) {
     
     // 1. 应用算子链 (如果有算子定义)
     if (Array.isArray(sub.operators) && sub.operators.length > 0) {
-        processed = await runOperatorChain(processed, sub.operators, {
+        const transformedRecords = await runOperatorChain(processed, sub.operators, {
             env: context?.env,
             speedTestRunner: context?.speedTestRunner,
-            tcpConnect: context?.tcpConnect
+            tcpConnect: context?.tcpConnect,
+            nodeMetadataByUrl: context?.nodeMetadataByUrl,
+            returnRecords: true
         });
+        rememberOperatorMetadata(context, transformedRecords);
+        processed = transformedRecords.map(record => record.url);
     }
     
     // 2. 应用传统的过滤规则 (exclude/include)

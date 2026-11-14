@@ -60,6 +60,72 @@ function readSpeedMetric(record, key) {
 }
 
 /**
+ * 按 URL 或 server:port 查找算子链外部注入的附加信息。
+ * server:port 兜底是为了兼容上游对节点名称（URL fragment）做过改写的情况。
+ */
+function lookupExternalMetadata(metadataMap, record) {
+    if (!metadataMap || typeof metadataMap.get !== 'function' || metadataMap.size === 0) return null;
+    if (record?.url && metadataMap.has(record.url)) return metadataMap.get(record.url);
+    const addressKey = record?.server ? `${record.server}:${record.port ?? ''}` : '';
+    if (addressKey && metadataMap.has(addressKey)) return metadataMap.get(addressKey);
+    return null;
+}
+
+/**
+ * 将算子链输入统一规范化为 Records。
+ *
+ * 既支持 URL 字符串数组（历史调用方式），也支持已经带 metadata 的节点对象数组。
+ * 传入对象时保留其 name / protocol / metadata 等字段，避免上游测速结果被重新
+ * 解析 URL 时覆盖。
+ */
+function normalizeChainInput(input, metadataByUrl) {
+    const items = Array.isArray(input) ? input : [];
+    return items.map(item => {
+        let record = null;
+
+        if (typeof item === 'string') {
+            record = NodeUtils.nodeUrlsToRecords([item], {
+                needServerPort: true,
+                ensureRegion: false
+            })[0] || null;
+        } else if (item && typeof item === 'object' && typeof item.url === 'string') {
+            const base = NodeUtils.nodeUrlsToRecords([item.url], {
+                needServerPort: true,
+                ensureRegion: false
+            })[0] || {};
+            record = {
+                ...base,
+                ...item,
+                originalName: item.originalName || base.originalName,
+                server: item.server || base.server,
+                port: item.port || base.port,
+                // 关键：对象自带的 metadata（例如测速得到的 latency / speed）
+                // 必须覆盖 URL 解析出的名称元数据，而不是被其替换。
+                metadata: {
+                    ...(base.metadata || {}),
+                    ...(item.metadata || {})
+                }
+            };
+        }
+
+        if (!record) return null;
+
+        const extra = lookupExternalMetadata(metadataByUrl, record);
+        if (extra) {
+            record = {
+                ...record,
+                ...extra,
+                metadata: {
+                    ...(record.metadata || {}),
+                    ...(extra.metadata || {})
+                }
+            };
+        }
+        return record;
+    }).filter(Boolean);
+}
+
+/**
  * Filter Operator
  */
 function opFilter(nodes, params) {
@@ -112,6 +178,15 @@ function opFilter(nodes, params) {
     // the condition" so untested nodes cannot slip through a latency/speed
     // filter by accident.
     const maxLatency = normalizeMetricLimit(params.maxLatency);
+    const minSpeed = normalizeMetricLimit(params.minSpeed);
+
+    if (maxLatency !== null || minSpeed !== null) {
+        // 调试日志：帮助排查 metadata 是否成功从测速算子流入 Filter。
+        console.log('[Operator][Filter] input:', result.length,
+            'latency(sample):', result.slice(0, 3).map(r => r?.metadata?.latency),
+            'maxLatency:', maxLatency, 'minSpeed:', minSpeed);
+    }
+
     if (maxLatency !== null) {
         result = result.filter(r => {
             const latency = readSpeedMetric(r, 'latency');
@@ -119,7 +194,6 @@ function opFilter(nodes, params) {
         });
     }
 
-    const minSpeed = normalizeMetricLimit(params.minSpeed);
     if (minSpeed !== null) {
         result = result.filter(r => {
             const speed = readSpeedMetric(r, 'speed');
@@ -263,24 +337,18 @@ async function opScript(nodes, params = {}, context) {
  * Main Entry Point for Operator Chain
  */
 export async function runOperatorChain(nodeUrls, operators, context = {}) {
-    if (!Array.isArray(operators) || operators.length === 0) {
-        return nodeUrls;
-    }
-
-    // 1. Convert URLs to Records
-    let records = NodeUtils.nodeUrlsToRecords(nodeUrls, { 
-        needServerPort: true, 
-        ensureRegion: false 
-    });
     const metadataByUrl = context.nodeMetadataByUrl instanceof Map
         ? context.nodeMetadataByUrl
         : new Map(Object.entries(context.nodeMetadataByUrl || {}));
-    if (metadataByUrl.size > 0) {
-        records = records.map(record => ({
-            ...record,
-            ...(metadataByUrl.get(record.url) || {})
-        }));
+
+    if (!Array.isArray(operators) || operators.length === 0) {
+        return context.returnRecords === true
+            ? normalizeChainInput(nodeUrls, metadataByUrl)
+            : nodeUrls;
     }
+
+    // 1. Convert input (URLs or Records) to Records without losing metadata
+    let records = normalizeChainInput(nodeUrls, metadataByUrl);
 
     const ua = (context.userAgent || '').toLowerCase();
     const platform = {

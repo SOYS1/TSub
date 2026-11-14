@@ -1,6 +1,7 @@
 <script setup>
-import { computed } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useI18n } from '../../../../i18n/index.js';
+import { loadRuntimeCapabilities, resolveSpeedTestSupport } from '../../../../lib/runtime-capabilities.js';
 import Input from '../../../ui/Input.vue';
 import Switch from '../../../ui/Switch.vue';
 
@@ -23,6 +24,28 @@ const DEFAULTS = {
   concurrency: 8
 };
 
+// Fail open until capabilities load: self-hosted users keep every option.
+const support = ref({ tcpPing: true, realPing: true, download: true });
+
+onMounted(async () => {
+  const capabilities = await loadRuntimeCapabilities();
+  if (capabilities) support.value = resolveSpeedTestSupport(capabilities);
+});
+
+// Cloudflare Pages cannot spawn a proxy core. Force the saved operator config
+// to TCP ping so the backend never runs a doomed real-ping pass.
+watch(support, (value) => {
+  if (value.realPing) return;
+  const current = params.value;
+  if (current.testMode !== 'tcp' || current.enableSpeedTest) {
+    emit('update:modelValue', {
+      ...current,
+      testMode: 'tcp',
+      enableSpeedTest: false
+    });
+  }
+});
+
 const radioGroup = `speedtest-mode-${Math.random().toString(36).slice(2)}`;
 
 const params = computed({
@@ -39,25 +62,30 @@ const updateNumber = (key, value, fallback) => {
   updateValue({ [key]: Number.isFinite(parsed) ? parsed : fallback });
 };
 
-const modeOptions = computed(() => [
-  {
-    value: 'tcp',
-    label: t('operators.speedTestModeTcp'),
-    hint: t('operators.speedTestModeTcpHint')
-  },
-  {
-    value: 'real',
-    label: t('operators.speedTestModeReal'),
-    hint: t('operators.speedTestModeRealHint')
+const modeOptions = computed(() => {
+  const options = [
+    {
+      value: 'tcp',
+      label: t('operators.speedTestModeTcp'),
+      hint: t('operators.speedTestModeTcpHint')
+    }
+  ];
+  if (support.value.realPing) {
+    options.push({
+      value: 'real',
+      label: t('operators.speedTestModeReal'),
+      hint: t('operators.speedTestModeRealHint')
+    });
   }
-]);
+  return options;
+});
 </script>
 
 <template>
   <div class="space-y-5">
     <div class="space-y-2">
       <label class="text-[11px] font-bold uppercase tracking-tight text-gray-400">{{ t('operators.speedTestMode') }}</label>
-      <div class="grid gap-2 sm:grid-cols-2">
+      <div class="grid gap-2" :class="modeOptions.length > 1 ? 'sm:grid-cols-2' : 'sm:grid-cols-1'">
         <label
           v-for="mode in modeOptions"
           :key="mode.value"
@@ -82,7 +110,7 @@ const modeOptions = computed(() => [
     </div>
 
     <Input
-      v-if="params.testMode === 'real'"
+      v-if="params.testMode === 'real' && support.realPing"
       :modelValue="params.pingUrl"
       @update:modelValue="(value) => updateValue({ pingUrl: value })"
       :label="t('operators.speedTestPingUrl')"
@@ -90,14 +118,20 @@ const modeOptions = computed(() => [
       size="sm"
     />
 
-    <p v-if="params.testMode === 'real'" class="px-1 text-[10px] leading-relaxed text-amber-600 dark:text-amber-400">
+    <p v-if="!support.realPing" class="px-1 text-[10px] leading-relaxed text-amber-600 dark:text-amber-400">
+      {{ t('operators.speedTestCloudflareNote') }}
+    </p>
+    <p v-else-if="params.testMode === 'real'" class="px-1 text-[10px] leading-relaxed text-amber-600 dark:text-amber-400">
       {{ t('operators.speedTestRealHint') }}
     </p>
     <p v-else class="px-1 text-[10px] leading-relaxed text-gray-400">
       {{ t('operators.speedTestTcpHint') }}
     </p>
 
-    <div class="rounded-xl border border-gray-100 bg-gray-50/60 p-3 dark:border-gray-800 dark:bg-gray-900/40">
+    <div
+      v-if="support.download"
+      class="rounded-xl border border-gray-100 bg-gray-50/60 p-3 dark:border-gray-800 dark:bg-gray-900/40"
+    >
       <div class="flex items-center justify-between gap-3">
         <div>
           <p class="text-sm font-medium text-gray-900 dark:text-gray-200">{{ t('operators.speedTestDownload') }}</p>
