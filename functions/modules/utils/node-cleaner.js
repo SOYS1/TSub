@@ -3,6 +3,8 @@
  * 负责节点URL的解码、修复、重命名和过滤
  */
 
+import { compileSafeRegexList } from '../../utils/safe-regex.js';
+
 /**
  * 修复节点URL编码问题（支持多种协议）
  * @param {string} nodeUrl 
@@ -195,12 +197,14 @@ export function buildRuleSet(lines, stripKeepPrefix = false) {
 
 export function buildSafeRegex(patterns) {
     if (!patterns || patterns.length === 0) return null;
-    try {
-        return new RegExp(patterns.join('|'), 'i');
-    } catch (e) {
-        console.warn('Invalid include/exclude regex, skipped:', e.message);
-        return null;
-    }
+    return compileSafeRegexList(patterns, 'i', {
+        onDegrade: (pattern, reason) => {
+            console.warn(
+                `[NodeCleaner] Unsafe include/exclude pattern degraded to literal match (${reason}):`,
+                pattern.slice(0, 120)
+            );
+        }
+    });
 }
 
 export function parseFilterRuleText(ruleText) {

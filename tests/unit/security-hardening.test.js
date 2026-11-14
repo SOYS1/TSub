@@ -337,7 +337,7 @@ describe('security hardening', () => {
     const infoSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const env = {
       TSUB_KV: createKv({
-        tsub_settings_v1: JSON.stringify({
+        worker_settings_v1: JSON.stringify({
           mytoken: 'super-secret-token',
           subConverter: 'backend',
           selectedRules: [],
@@ -350,7 +350,8 @@ describe('security hardening', () => {
 
     await handleTsubRequest({
       request: new Request('https://example.com/sub/super-secret-token'),
-      env
+      env,
+      waitUntil: vi.fn()
     });
 
     const logs = infoSpy.mock.calls.map(call => call.join(' ')).join('\n');

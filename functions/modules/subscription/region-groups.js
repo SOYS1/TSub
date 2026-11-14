@@ -1,4 +1,6 @@
 // 地区展示配置：包含 Emoji 和标准中文名称
+import { compileSafeRegex } from '../../utils/safe-regex.js';
+
 const REGION_DISPLAY_CONFIG = {
     '香港': { flag: '🇭🇰', name: '香港节点' },
     '台湾': { flag: '🇹🇼', name: '台湾节点' },
@@ -40,14 +42,12 @@ function normalizeRegionOverrides(overrides = []) {
     return overrides
         .map(rule => {
             if (!rule || !rule.pattern || !rule.region) return null;
-            try {
-                return {
-                    pattern: new RegExp(rule.pattern, rule.flags || 'i'),
-                    region: String(rule.region).trim()
-                };
-            } catch {
-                return null;
-            }
+            const pattern = compileSafeRegex(rule.pattern, rule.flags || 'i');
+            if (!pattern) return null;
+            return {
+                pattern,
+                region: String(rule.region).trim()
+            };
         })
         .filter(Boolean);
 }

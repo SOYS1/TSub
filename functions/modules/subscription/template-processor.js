@@ -1,4 +1,5 @@
 import { groupNodeLinesByRegion } from './region-groups.js';
+import { compileSafeRegex } from '../../utils/safe-regex.js';
 
 /**
  * 解析并扩展策略组中的正则过滤器
@@ -20,16 +21,16 @@ function resolveGroupFilters(model) {
                 return;
             }
 
-            try {
-                const regex = new RegExp(filter, 'i');
-                proxyNames.forEach(name => {
-                    if (regex.test(name)) {
-                        currentMembers.add(name);
-                    }
-                });
-            } catch (e) {
-                console.warn(`[Template Processor] Invalid regex filter: ${filter}`, e);
+            const regex = compileSafeRegex(filter, 'i');
+            if (!regex) {
+                console.warn(`[Template Processor] Unsafe or invalid regex filter skipped: ${filter}`);
+                return;
             }
+            proxyNames.forEach(name => {
+                if (regex.test(name)) {
+                    currentMembers.add(name);
+                }
+            });
         });
 
         group.members = Array.from(currentMembers);

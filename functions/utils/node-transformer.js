@@ -7,6 +7,7 @@ import { parseNodeInfo, extractNodeRegion, getRegionEmoji, REGION_KEYWORDS, REGI
 import { extractNodeMetadata } from '../modules/utils/metadata-extractor.js';
 import { base64EncodeUtf8 } from '../modules/utils.js';
 import { evaluateDslExpression, renderDslTemplate } from './expression-dsl.js';
+import { compileSafeRegex, REGEX_LIMITS } from './safe-regex.js';
 
 // ============ 默认配置 ============
 
@@ -24,7 +25,7 @@ function warnInvalidRegex(rule, error) {
     const key = `${rule.pattern || ''}|${rule.flags || ''}`;
     if (warnedRegexRules.has(key)) return;
     warnedRegexRules.add(key);
-    console.warn('[NodeTransform] Invalid rename regex:', {
+    console.warn('[NodeTransform] Invalid or unsafe regex:', {
         pattern: rule.pattern,
         flags: rule.flags,
         error: error?.message || String(error)
@@ -225,7 +226,12 @@ function normalizeConfig(cfg) {
 // ============ 转换函数 ============
 
 export function matchesRegexRules(name, rules) {
-    const value = String(name || '');
+    const rawValue = String(name || '');
+    // Bound the tested text as a second line of defence against long inputs.
+    const value = rawValue.length > REGEX_LIMITS.maxInputLength
+        ? rawValue.slice(0, REGEX_LIMITS.maxInputLength)
+        : rawValue;
+
     for (const rule of rules) {
         if (!rule) continue;
         
@@ -234,13 +240,24 @@ export function matchesRegexRules(name, rules) {
         const flags = typeof rule === 'string' ? 'i' : (rule.flags || 'i');
         
         if (!pattern) continue;
-        
-        try {
-            const re = new RegExp(pattern, flags);
-            if (re.test(value)) return true;
-        } catch (error) {
-            warnInvalidRegex(typeof rule === 'string' ? { pattern: rule } : rule, error);
+
+        const re = compileSafeRegex(pattern, flags);
+        if (re) {
+            try {
+                if (re.test(value)) return true;
+            } catch (error) {
+                warnInvalidRegex(typeof rule === 'string' ? { pattern: rule } : rule, error);
+            }
+            continue;
         }
+
+        // Unsafe or invalid patterns fall back to a literal comparison so a
+        // bad rule can never trigger catastrophic backtracking.
+        warnInvalidRegex(
+            typeof rule === 'string' ? { pattern: rule } : rule,
+            new Error('unsafe or invalid regex')
+        );
+        if (value.toLowerCase().includes(String(pattern).toLowerCase())) return true;
     }
     return false;
 }
@@ -321,6 +338,8 @@ export function setNodeName(url, protocol, newName) {
 export function applyRegexRename(name, rules, record = null) {
     let result = String(name || '');
     if (!Array.isArray(rules)) return result;
+    // Pathological names are not worth risking a runaway regex on.
+    if (result.length > REGEX_LIMITS.maxInputLength * 2) return result.trim();
 
     const regexGroups = record?.regexGroups || {};
 
@@ -333,12 +352,19 @@ export function applyRegexRename(name, rules, record = null) {
         const flags = typeof rule === 'string' ? 'gi' : (rule.flags || 'gi');
 
         if (!pattern) continue;
+
+        const re = compileSafeRegex(pattern, flags);
+        if (!re) {
+            warnInvalidRegex(
+                typeof rule === 'string' ? { pattern: rule } : rule,
+                new Error('unsafe or invalid regex')
+            );
+            continue;
+        }
         
         try {
-            const re = new RegExp(pattern, flags);
-            
             // 提取捕获组：只对第一次匹配到的内容进行组提取
-            const matchMatch = String(result).match(new RegExp(pattern, flags.replace(/g/g, '')));
+            const matchMatch = result.match(new RegExp(re.source, flags.replace(/g/g, '')));
             if (matchMatch) {
                 // 索引组
                 matchMatch.forEach((val, i) => {

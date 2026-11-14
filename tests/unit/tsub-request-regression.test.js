@@ -609,4 +609,95 @@ describe('handleTsubRequest regression coverage', () => {
             logSpy.mockRestore();
         }
     });
+
+    it('accepts a well-formed generated token while mytoken is still auto', async () => {
+        const subscriptions = [{
+            id: 'sub-a',
+            name: 'Airport A',
+            url: 'https://airport.example/sub',
+            enabled: true
+        }];
+        const adapter = createStorageAdapter({
+            settings: { mytoken: 'auto', enableFlagEmoji: false, enableTrafficNode: false },
+            subscriptions
+        });
+        createAdapter.mockReturnValue(adapter);
+        vi.stubGlobal('fetch', vi.fn(async () => new Response('trojan://pass@example.com:443#HK', { status: 200 })));
+
+        const logSpy = silenceExpectedRequestLogs();
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+            const { handleTsubRequest } = await import('../../functions/modules/subscription/main-handler.js');
+            const response = await handleTsubRequest({
+                request: new Request('https://tsub.example/sub/55dafd9a-f2ec-4c74-adf5-b9c72f0311de?target=nodes', {
+                    headers: { 'User-Agent': 'ClashMeta' }
+                }),
+                env: {},
+                waitUntil: vi.fn()
+            });
+            const text = await response.text();
+
+            expect(response.status).toBe(200);
+            expect(text).toContain('trojan://pass@example.com:443#');
+            expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[TSub Auth]'));
+        } finally {
+            logSpy.mockRestore();
+            warnSpy.mockRestore();
+        }
+    });
+
+    it('rejects a mismatched token once a fixed mytoken is configured', async () => {
+        const adapter = createStorageAdapter({
+            settings: { mytoken: 'stable-token', enableFlagEmoji: false, enableTrafficNode: false }
+        });
+        createAdapter.mockReturnValue(adapter);
+        vi.stubGlobal('fetch', vi.fn(async () => new Response('trojan://pass@example.com:443#HK', { status: 200 })));
+
+        const logSpy = silenceExpectedRequestLogs();
+        try {
+            const { handleTsubRequest } = await import('../../functions/modules/subscription/main-handler.js');
+            const response = await handleTsubRequest({
+                request: new Request('https://tsub.example/sub/55dafd9a-f2ec-4c74-adf5-b9c72f0311de?target=nodes', {
+                    headers: { 'User-Agent': 'ClashMeta' }
+                }),
+                env: {},
+                waitUntil: vi.fn()
+            });
+
+            expect(response.status).toBe(403);
+            expect(await response.text()).toContain('Invalid Token');
+            expect(globalThis.fetch).not.toHaveBeenCalled();
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it('still rejects malformed and overlong tokens in auto mode', async () => {
+        const adapter = createStorageAdapter({
+            settings: { mytoken: 'auto', enableFlagEmoji: false, enableTrafficNode: false }
+        });
+        createAdapter.mockReturnValue(adapter);
+        vi.stubGlobal('fetch', vi.fn(async () => new Response('trojan://pass@example.com:443#HK', { status: 200 })));
+
+        const logSpy = silenceExpectedRequestLogs();
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+            const { handleTsubRequest } = await import('../../functions/modules/subscription/main-handler.js');
+            for (const token of ['bad!token', 'a'.repeat(129)]) {
+                const response = await handleTsubRequest({
+                    request: new Request(`https://tsub.example/sub/${token}?target=nodes`, {
+                        headers: { 'User-Agent': 'ClashMeta' }
+                    }),
+                    env: {},
+                    waitUntil: vi.fn()
+                });
+                expect(response.status).toBe(403);
+                expect(await response.text()).toContain('Invalid Token');
+            }
+            expect(globalThis.fetch).not.toHaveBeenCalled();
+        } finally {
+            logSpy.mockRestore();
+            warnSpy.mockRestore();
+        }
+    });
 });

@@ -12,6 +12,7 @@ import { createTimeoutFetch } from '../modules/utils.js';
 import { assertPublicNetworkUrl, redactErrorMessage } from '../modules/security-utils.js';
 import { filterNodesBySelection } from '../modules/utils/node-fingerprint.js';
 import { hasEnabledRenameOperator } from '../modules/subscription/source-operators.js';
+import { compileSafeRegexList } from '../utils/safe-regex.js';
 
 /**
  * 订阅获取配置常量
@@ -961,14 +962,25 @@ function buildRuleSet(lines, stripKeepPrefix = false) {
     };
 }
 
-function buildSafeRegex(patterns) {
-    if (!patterns.length) return null;
-    try {
-        return new RegExp(patterns.join('|'), 'i');
-    } catch (e) {
-        console.warn('Invalid include/exclude regex, skipped:', e.message);
-        return null;
-    }
+/**
+ * Build the include/exclude matcher from user supplied rules.
+ *
+ * Patterns are length-capped and validated before compilation. Anything that
+ * could trigger catastrophic backtracking (for example `(a+)+$`) is degraded
+ * to a literal match, so a bad rule can never hang the Worker.
+ *
+ * Exported for unit tests.
+ */
+export function buildSafeRegex(patterns) {
+    if (!Array.isArray(patterns) || patterns.length === 0) return null;
+    return compileSafeRegexList(patterns, 'i', {
+        onDegrade: (pattern, reason) => {
+            console.warn(
+                `[Filter] Unsafe include/exclude pattern degraded to literal match (${reason}):`,
+                pattern.slice(0, 120)
+            );
+        }
+    });
 }
 
 function filterNodes(nodes, rules, mode = 'exclude') {

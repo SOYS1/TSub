@@ -30,6 +30,46 @@ function maskSensitiveLogValue(value) {
     return `${text.slice(0, 4)}…${text.slice(-4)} (${text.length})`;
 }
 
+export const AUTO_MAIN_TOKEN = 'auto';
+const MAIN_TOKEN_MAX_LENGTH = 128;
+const MAIN_TOKEN_PATTERN = /^[A-Za-z0-9._~-]+$/;
+let warnedAutoMainToken = false;
+
+/**
+ * A token that may be used while `mytoken` is still the default `'auto'`.
+ *
+ * The literal `'auto'` keeps legacy `/auto` links working. Any other token must
+ * look like a real generated token (UUID / URL-safe string) so empty or
+ * malformed paths are still rejected.
+ */
+export function isAutoMainToken(token) {
+    const value = typeof token === 'string' ? token.trim() : '';
+    return value.length > 0
+        && value.length <= MAIN_TOKEN_MAX_LENGTH
+        && MAIN_TOKEN_PATTERN.test(value);
+}
+
+/**
+ * Validate the full-subscription (non-profile) token.
+ *
+ * `mytoken === 'auto'` means the administrator never saved a fixed token.
+ * Treating it as an exact-match secret made every real generated link return
+ * 403, so auto mode accepts any well-formed token instead. Once a fixed token
+ * is configured, the exact-match check is enforced again.
+ */
+export function isMainTokenAuthorized(token, config) {
+    const configured = typeof config?.mytoken === 'string' ? config.mytoken.trim() : '';
+    if (!configured || configured === AUTO_MAIN_TOKEN) {
+        const allowed = isAutoMainToken(token);
+        if (allowed && token !== AUTO_MAIN_TOKEN && !warnedAutoMainToken) {
+            warnedAutoMainToken = true;
+            console.warn('[TSub Auth] mytoken is not configured; accepting a well-formed token. Set a fixed token in Settings for stable links.');
+        }
+        return allowed;
+    }
+    return Boolean(token) && token === configured;
+}
+
 const PROFILE_DOWNLOAD_COUNT_PREFIX = 'tsub_profile_download_count_';
 
 function getProfileDownloadCountKey(profile) {
@@ -567,8 +607,10 @@ export async function handleTsubRequest(context) {
             return new Response('Profile not found or disabled', { status: 404 });
         }
     } else {
-        // [修正] 使用 config 變量
-        if (!token || token !== config.mytoken) {
+        // [Fix] `mytoken: 'auto'` means no fixed token has been configured yet.
+        // It must not be treated as an exact-match secret, otherwise every
+        // real generated full-subscription link returns 403.
+        if (!isMainTokenAuthorized(token, config)) {
             return new Response('Invalid Token', { status: 403 });
         }
         targetTsubs = allTsubs.filter(s => s.enabled);
