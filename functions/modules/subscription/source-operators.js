@@ -78,10 +78,14 @@ export async function applySubscriptionOperators(nodes, subscription, options = 
     if (nodeUrls.length === 0) return nodes;
 
     try {
-        const transformedUrls = await runOperatorChain(nodeUrls, operators, {
+        const transformedRecords = await runOperatorChain(nodeUrls, operators, {
             subName: subscription?.name,
             userAgent: options.userAgent,
-            config: options.config
+            config: options.config,
+            env: options.env,
+            speedTestRunner: options.speedTestRunner,
+            tcpConnect: options.tcpConnect,
+            returnRecords: true
         });
 
         // 以 server:port 作为回退映射，兼容算子链中的排序 / 去重 / 过滤。
@@ -95,8 +99,8 @@ export async function applySubscriptionOperators(nodes, subscription, options = 
             }
         }
 
-        return transformedUrls.map((url, index) => {
-            const info = parseNodeInfo(url) || {};
+        return transformedRecords.map((record, index) => {
+            const info = parseNodeInfo(record?.url) || {};
             const addressKey = info?.server ? `${info.server}:${info.port ?? ''}` : null;
             const fallback = (addressKey && fallbackByAddress.get(addressKey))
                 || nodes[index]
@@ -105,7 +109,8 @@ export async function applySubscriptionOperators(nodes, subscription, options = 
             return {
                 ...fallback,
                 ...info,
-                url,
+                metadata: record?.metadata || fallback.metadata || info.metadata,
+                url: record?.url,
                 subscriptionName: fallback.subscriptionName || info.subscriptionName || subscription?.name || '未知'
             };
         });

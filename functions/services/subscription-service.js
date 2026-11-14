@@ -373,7 +373,10 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
             currentNodes = await runOperatorChain(currentNodes, subOperators, {
                 subName: subSource?.name,
                 userAgent,
-                config
+                config,
+                env: context?.env,
+                speedTestRunner: context?.speedTestRunner,
+                tcpConnect: context?.tcpConnect
             });
         }
 
@@ -406,7 +409,7 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
             const finalRawUrl = shouldAddPrefix ? prependNodeName(processedUrl, manualNodePrefix) : processedUrl;
 
             // [核心对齐] 对手动节点应用订阅源级转换（算子+过滤 + 组级诊断）
-            const transformed = await applySubscriptionTransforms([finalRawUrl], sub);
+            const transformed = await applySubscriptionTransforms([finalRawUrl], sub, context);
             if (transformed.length > 0) {
                 manualProcessedLines.push(...transformed);
             }
@@ -454,7 +457,7 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
             : nodes.join('\n');
         const finalizeCachedNodes = async (nodes) => {
             try {
-                return applySourcePrefix(await applySubscriptionTransforms(nodes, sub));
+                return applySourcePrefix(await applySubscriptionTransforms(nodes, sub, context));
             } catch (error) {
                 console.warn('[Subscription] Failed to apply operators to cached nodes:', error?.message || error);
                 return nodes.join('\n');
@@ -528,7 +531,7 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
             const cacheableNodes = validNodes.filter(isRealProxyNode);
 
             // --- 统一转换治理 (算子 + 过滤 + 组级诊断) ---
-            validNodes = await applySubscriptionTransforms(validNodes, sub);
+            validNodes = await applySubscriptionTransforms(validNodes, sub, context);
 
             const realNodes = validNodes.filter(isRealProxyNode);
             if (cacheEnabled && realNodes.length === 0) {
@@ -604,7 +607,10 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
         currentLines = await runOperatorChain(currentLines, activeOperators, {
             subName: profilePrefixSettings?.name,
             userAgent,
-            config
+            config,
+            env: context?.env,
+            speedTestRunner: context?.speedTestRunner,
+            tcpConnect: context?.tcpConnect
         });
     }
 
@@ -849,14 +855,18 @@ function applyFilterRules(validNodes, sub) {
  * @param {Object} sub 
  * @returns {Promise<string[]>}
  */
-async function applySubscriptionTransforms(nodeUrls, sub) {
+async function applySubscriptionTransforms(nodeUrls, sub, context = null) {
     if (!nodeUrls || nodeUrls.length === 0) return [];
     
     let processed = [...nodeUrls];
     
     // 1. 应用算子链 (如果有算子定义)
     if (Array.isArray(sub.operators) && sub.operators.length > 0) {
-        processed = await runOperatorChain(processed, sub.operators);
+        processed = await runOperatorChain(processed, sub.operators, {
+            env: context?.env,
+            speedTestRunner: context?.speedTestRunner,
+            tcpConnect: context?.tcpConnect
+        });
     }
     
     // 2. 应用传统的过滤规则 (exclude/include)

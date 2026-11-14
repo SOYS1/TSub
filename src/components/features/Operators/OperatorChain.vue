@@ -5,6 +5,7 @@ import FilterEditor from './components/FilterEditor.vue';
 import RenameEditor from './components/RenameEditor.vue';
 import SortEditor from './components/SortEditor.vue';
 import DedupEditor from './components/DedupEditor.vue';
+import SpeedTestEditor from './components/SpeedTestEditor.vue';
 import Input from '../../ui/Input.vue';
 
 const props = defineProps({
@@ -97,11 +98,19 @@ const addOperator = (type) => {
 
 const getInitialParams = (type) => {
   switch (type) {
-    case 'filter': return { include: { enabled: false, rules: [] }, exclude: { enabled: false, rules: [] }, protocols: { enabled: false, values: [] }, regions: { enabled: false, values: [] } };
+    case 'filter': return { include: { enabled: false, rules: [] }, exclude: { enabled: false, rules: [] }, protocols: { enabled: false, values: [] }, regions: { enabled: false, values: [] }, maxLatency: null, minSpeed: null };
     case 'rename': return { regex: { enabled: false, rules: [] }, template: { enabled: false, template: '' } };
     case 'script': return { code: '', url: '' };
     case 'sort': return { keys: [{ key: 'region', order: 'asc', customOrder: ['香港', '台湾', '日本', '新加坡', '美国', '韩国', '英国', '德国', '法国', '加拿大'] }] };
     case 'dedup': return { mode: 'serverPort', includeProtocol: true, prefer: { protocolOrder: [] } };
+    case 'speedtest': return {
+      testMode: 'real',
+      pingUrl: 'http://cp.cloudflare.com/generate_204',
+      enableSpeedTest: false,
+      speedTestUrl: 'https://speed.cloudflare.com/__down?bytes=10000000',
+      timeout: 8000,
+      concurrency: 8
+    };
     default: return {};
   }
 };
@@ -132,7 +141,7 @@ const toggleOperator = (event, index) => {
 };
 
 const operatorLabel = (type) => t(`operators.${type}`);
-const ALL_OPERATOR_TYPES = ['filter', 'rename', 'script', 'sort', 'dedup'];
+const ALL_OPERATOR_TYPES = ['filter', 'rename', 'script', 'sort', 'dedup', 'speedtest'];
 const operatorTypes = computed(() => {
   if (!Array.isArray(props.allowedTypes) || props.allowedTypes.length === 0) {
     return ALL_OPERATOR_TYPES;
@@ -147,6 +156,7 @@ const getOperatorIcon = (type) => {
         case 'script': return '<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>';
         case 'sort': return '<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" /></svg>';
         case 'dedup': return '<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>';
+        case 'speedtest': return '<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>';
     }
 };
 
@@ -264,6 +274,7 @@ const updateOperatorParams = (index, params) => {
               <RenameEditor v-else-if="op.type === 'rename'" :modelValue="op.params" @update:modelValue="(val) => updateOperatorParams(index, val)" />
               <SortEditor v-else-if="op.type === 'sort'" :modelValue="op.params" @update:modelValue="(val) => updateOperatorParams(index, val)" />
               <DedupEditor v-else-if="op.type === 'dedup'" :modelValue="op.params" @update:modelValue="(val) => updateOperatorParams(index, val)" />
+              <SpeedTestEditor v-else-if="op.type === 'speedtest'" :modelValue="op.params" @update:modelValue="(val) => updateOperatorParams(index, val)" />
               
               <div v-else-if="op.type === 'script'" class="space-y-4">
                 <Input 

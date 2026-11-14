@@ -6,6 +6,7 @@
 import * as NodeUtils from './node-transformer.js';
 import { extractNodeRegion, getRegionEmoji } from '../modules/utils/geo-utils.js';
 import { matchesDslCondition, renderDslTemplate } from './expression-dsl.js';
+import { runSpeedTestOperator } from './speed-test.js';
 
 /**
  * 辅助函数：将规则模式规范化为正则表达式数组
@@ -28,6 +29,34 @@ function normalizeRules(rules) {
         }
     }
     return normalized;
+}
+
+/**
+ * 读取 Filter 的性能阈值。支持直接数字，也兼容 { enabled, value } 结构。
+ * 返回 null 表示未启用该条件。
+ */
+function normalizeMetricLimit(value) {
+    if (value && typeof value === 'object') {
+        if (value.enabled === false) return null;
+        value = value.value;
+    }
+    if (value === null || value === undefined || value === '') return null;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+}
+
+/**
+ * 从节点 metadata 读取测速指标。未测速（字段缺失/非数字）返回 null，
+ * 便于 Filter 将未测速节点视为不满足条件。
+ */
+function readSpeedMetric(record, key) {
+    const value = record?.metadata?.[key];
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (typeof value === 'string' && value.trim() !== '') {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : null;
+    }
+    return null;
 }
 
 /**
@@ -78,6 +107,26 @@ function opFilter(nodes, params) {
         const allowed = new Set(regions.values);
         result = result.filter(r => allowed.has(r.regionZh) || allowed.has(r.region));
     }
+
+    // Speed-test thresholds. Missing metrics are treated as "not satisfying
+    // the condition" so untested nodes cannot slip through a latency/speed
+    // filter by accident.
+    const maxLatency = normalizeMetricLimit(params.maxLatency);
+    if (maxLatency !== null) {
+        result = result.filter(r => {
+            const latency = readSpeedMetric(r, 'latency');
+            return latency !== null && latency >= 0 && latency <= maxLatency;
+        });
+    }
+
+    const minSpeed = normalizeMetricLimit(params.minSpeed);
+    if (minSpeed !== null) {
+        result = result.filter(r => {
+            const speed = readSpeedMetric(r, 'speed');
+            return speed !== null && speed >= minSpeed;
+        });
+    }
+
     return result;
 }
 
@@ -262,6 +311,10 @@ export async function runOperatorChain(nodeUrls, operators, context = {}) {
             case 'script':
                 records = await opScript(records, params, enrichedContext);
                 break;
+            case 'speedtest':
+            case 'speed-test':
+                records = await runSpeedTestOperator(records, params, enrichedContext);
+                break;
             case 'sort':
                 if (params && Array.isArray(params.keys)) {
                     const needsRegion = params.keys.some(k => k.key === 'region' || k.key === 'regionZh');
@@ -292,5 +345,14 @@ export async function runOperatorChain(nodeUrls, operators, context = {}) {
     }
 
     // 3. Convert Records back to URLs
-    return NodeUtils.recordsToNodeUrls(records);
+    // `returnRecords` lets callers that need the freshly measured metadata
+    // (for example a preview table) consume the enriched records directly.
+    const syncedRecords = records.map(record => (
+        record.name && record.name !== record.originalName
+            ? { ...record, url: NodeUtils.setNodeName(record.url, record.protocol, record.name) }
+            : record
+    ));
+    if (typeof context.onRecords === 'function') context.onRecords(syncedRecords);
+    if (context.returnRecords === true) return syncedRecords;
+    return syncedRecords.map(record => record.url);
 }

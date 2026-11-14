@@ -8,6 +8,7 @@ import { ensureD1Schema, SettingsCache } from '../functions/storage-adapter.js';
 import { createServerDatabaseManager } from './database.mjs';
 import { startInternalScheduler } from './scheduler.mjs';
 import { probeEdgeHandshake } from './edge-probe.mjs';
+import { createSpeedTestRunner } from './speedtest-runner.mjs';
 import { redactSensitiveObject } from '../functions/modules/security-utils.js';
 
 process.umask(0o077);
@@ -135,6 +136,9 @@ for (const binding of Object.values(database.databases)) await ensureD1Schema(bi
 const env = {
   ...process.env,
   TSUB_PLATFORM: 'server',
+  // Real-ping / download tests need a proxy core. Only the self-hosted
+  // controller can provide this runner; Cloudflare Workers degrade to TCP mode.
+  TSUB_SPEEDTEST_RUNNER: createSpeedTestRunner(),
   TSUB_STORAGE_TYPE: database.type,
   TSUB_SQL_DB: database.binding,
   TSUB_SERVER_DATABASES: database.databases,

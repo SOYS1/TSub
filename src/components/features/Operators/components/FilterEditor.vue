@@ -18,7 +18,9 @@ const params = computed({
     include: { enabled: false, rules: [], ...props.modelValue.include },
     exclude: { enabled: false, rules: [], ...props.modelValue.exclude },
     protocols: { enabled: false, values: [], ...props.modelValue.protocols },
-    regions: { enabled: false, values: [], ...props.modelValue.regions }
+    regions: { enabled: false, values: [], ...props.modelValue.regions },
+    maxLatency: props.modelValue.maxLatency ?? null,
+    minSpeed: props.modelValue.minSpeed ?? null
   }),
   set: (val) => emit('update:modelValue', val)
 });
@@ -64,6 +66,12 @@ const regionLabels = {
 };
 const statusLabel = (enabled) => t(enabled ? 'operators.statusOn' : 'operators.statusOff');
 const regionLabel = (region) => t('operators.regionLabel', { region: regionLabels[region] || region });
+
+const updateMetric = (key, rawValue) => {
+  const value = String(rawValue ?? '').trim();
+  const parsed = value === '' ? null : Number(value);
+  updateParam(key, Number.isFinite(parsed) && parsed >= 0 ? parsed : null);
+};
 
 const toggleValue = (type, value) => {
   const current = { ...params.value[type] };
@@ -172,6 +180,38 @@ const toggleValue = (type, value) => {
                 {{ t('operators.filterEmptyRules') }}
             </div>
         </div>
+    </div>
+
+    <!-- Speed-test thresholds -->
+    <div class="space-y-2">
+      <label class="text-[11px] font-bold text-gray-400 uppercase tracking-tight">{{ t('operators.performanceFilter') }}</label>
+      <div class="grid gap-3 rounded-xl border border-gray-100 bg-gray-50/50 p-3 dark:border-gray-800 dark:bg-gray-900/40 sm:grid-cols-2">
+        <div class="space-y-1">
+          <label class="px-1 text-[10px] font-medium text-gray-500">{{ t('operators.maxLatency') }}</label>
+          <input
+            :value="params.maxLatency ?? ''"
+            @input="updateMetric('maxLatency', $event.target.value)"
+            type="number"
+            min="0"
+            step="1"
+            placeholder="200"
+            class="w-full rounded-lg border border-transparent bg-white px-3 py-1.5 text-[11px] outline-none transition-all focus:border-indigo-500/30 dark:bg-gray-800"
+          />
+        </div>
+        <div class="space-y-1">
+          <label class="px-1 text-[10px] font-medium text-gray-500">{{ t('operators.minSpeed') }}</label>
+          <input
+            :value="params.minSpeed ?? ''"
+            @input="updateMetric('minSpeed', $event.target.value)"
+            type="number"
+            min="0"
+            step="1"
+            placeholder="500"
+            class="w-full rounded-lg border border-transparent bg-white px-3 py-1.5 text-[11px] outline-none transition-all focus:border-indigo-500/30 dark:bg-gray-800"
+          />
+        </div>
+      </div>
+      <p class="px-1 text-[10px] text-gray-400">{{ t('operators.performanceFilterHint') }}</p>
     </div>
   </div>
 </template>

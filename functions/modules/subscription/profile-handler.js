@@ -149,7 +149,7 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
             url: effectiveUrl,
             subscriptionName: node.name || '手工节点',
             group: node.group || ''
-        }], node, { config: settings, userAgent });
+        }], node, { config: settings, userAgent, env });
         const primaryNode = operatedNodes[0] || {};
         const finalUrl = primaryNode.url || effectiveUrl;
 
@@ -176,7 +176,8 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
             // 先执行订阅源级算子，再交给订阅组级算子，顺序与正式生成一致
             result.nodes = await applySubscriptionOperators(result.nodes, sub, {
                 config: settings,
-                userAgent
+                userAgent,
+                env
             });
         }
         return result;
@@ -219,13 +220,17 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
         }
 
         let transformedUrls = nodeUrls;
+        let transformedRecords = null;
         if (activeOperators.length > 0) {
-            transformedUrls = await runOperatorChain(nodeUrls, activeOperators, {
+            transformedRecords = await runOperatorChain(nodeUrls, activeOperators, {
                 subName: profile?.name,
                 userAgent,
                 config: settings,
-                nodeMetadataByUrl
+                nodeMetadataByUrl,
+                env,
+                returnRecords: true
             });
+            transformedUrls = transformedRecords.map(record => record.url);
         } else if (effectiveNodeTransform?.enabled) {
             const defaultTemplate = '{emoji}{region}-{protocol}-{index}';
             const effectiveTemplate = effectiveNodeTransform.rename?.template?.template || defaultTemplate;
@@ -235,7 +240,7 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
             });
         }
 
-        processedNodes = transformedUrls.map(transformedUrl => {
+        processedNodes = transformedUrls.map((transformedUrl, index) => {
             const nodeInfo = parseNodeInfo(transformedUrl);
             const originalNode = allNodes.find(n => {
                 try {
@@ -246,8 +251,10 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
                     return false;
                 }
             });
+            const record = transformedRecords?.[index];
             return {
                 ...nodeInfo,
+                ...(record?.metadata ? { metadata: record.metadata } : {}),
                 subscriptionName: originalNode?.subscriptionName || nodeInfo.subscriptionName || '未知'
             };
         });
