@@ -21,7 +21,9 @@ const DEFAULTS = {
   enableSpeedTest: false,
   speedTestUrl: 'https://speed.cloudflare.com/__down?bytes=10000000',
   timeout: 8000,
-  concurrency: 8
+  concurrency: 8,
+  cacheTtlMinutes: 30,
+  batchSize: 5
 };
 
 // Fail open until capabilities load: self-hosted users keep every option.
@@ -172,6 +174,37 @@ const modeOptions = computed(() => {
         type="number"
         size="sm"
       />
+    </div>
+
+    <div class="space-y-3 rounded-xl border border-gray-100 bg-gray-50/60 p-3 dark:border-gray-800 dark:bg-gray-900/40">
+      <div>
+        <p class="text-sm font-medium text-gray-900 dark:text-gray-200">{{ t('operators.speedTestCacheTitle') }}</p>
+        <p class="text-[10px] leading-relaxed text-gray-500 dark:text-gray-400">{{ t('operators.speedTestCacheHint') }}</p>
+      </div>
+
+      <div class="grid gap-4 sm:grid-cols-2">
+        <Input
+          :modelValue="params.cacheTtlMinutes"
+          @update:modelValue="(value) => updateNumber('cacheTtlMinutes', value, DEFAULTS.cacheTtlMinutes)"
+          :label="t('operators.speedTestCacheTtl')"
+          type="number"
+          size="sm"
+        />
+        <Input
+          :modelValue="params.batchSize"
+          @update:modelValue="(value) => updateNumber('batchSize', value, DEFAULTS.batchSize)"
+          :label="t('operators.speedTestBatchSize')"
+          type="number"
+          size="sm"
+        />
+      </div>
+
+      <p v-if="!support.realPing" class="text-[10px] leading-relaxed text-amber-600 dark:text-amber-400">
+        {{ t('operators.speedTestCloudflareBatchNote') }}
+      </p>
+      <p class="text-[10px] leading-relaxed text-gray-400">
+        {{ t('operators.speedTestCacheRuntimeHint') }}
+      </p>
     </div>
 
     <p class="px-1 text-[10px] leading-relaxed text-gray-400">

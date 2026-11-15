@@ -130,7 +130,7 @@ const addOperator = (type) => {
 
 const getInitialParams = (type) => {
   switch (type) {
-    case 'filter': return { include: { enabled: false, rules: [] }, exclude: { enabled: false, rules: [] }, protocols: { enabled: false, values: [] }, regions: { enabled: false, values: [] }, maxLatency: null, minSpeed: null };
+    case 'filter': return { include: { enabled: false, rules: [] }, exclude: { enabled: false, rules: [] }, protocols: { enabled: false, values: [] }, regions: { enabled: false, values: [] }, maxLatency: null, minSpeed: null, untestedPolicy: 'exclude' };
     case 'rename': return { regex: { enabled: false, rules: [] }, template: { enabled: false, template: '' } };
     case 'script': return { code: '', url: '' };
     case 'sort': return { keys: [{ key: 'region', order: 'asc', customOrder: ['香港', '台湾', '日本', '新加坡', '美国', '韩国', '英国', '德国', '法国', '加拿大'] }] };

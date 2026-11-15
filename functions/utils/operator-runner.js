@@ -7,6 +7,7 @@ import * as NodeUtils from './node-transformer.js';
 import { extractNodeRegion, getRegionEmoji } from '../modules/utils/geo-utils.js';
 import { matchesDslCondition, renderDslTemplate } from './expression-dsl.js';
 import { runSpeedTestOperator } from './speed-test.js';
+import { hydrateRecordsFromSpeedTestCache } from './speed-test-cache.js';
 
 /**
  * 辅助函数：将规则模式规范化为正则表达式数组
@@ -128,7 +129,7 @@ function normalizeChainInput(input, metadataByUrl) {
 /**
  * Filter Operator
  */
-function opFilter(nodes, params) {
+async function opFilter(nodes, params, context = {}) {
     if (!params) return nodes;
     const { include, exclude, protocols, regions } = params;
     let result = [...nodes];
@@ -174,30 +175,40 @@ function opFilter(nodes, params) {
         result = result.filter(r => allowed.has(r.regionZh) || allowed.has(r.region));
     }
 
-    // Speed-test thresholds. Missing metrics are treated as "not satisfying
-    // the condition" so untested nodes cannot slip through a latency/speed
-    // filter by accident.
+    // Speed-test thresholds. Cached measurements from earlier runs are
+    // hydrated first so a filter-only chain can also use them. Missing metrics
+    // follow `untestedPolicy` (default: exclude), matching the historical
+    // behaviour where untested nodes never slip through a latency filter.
     const maxLatency = normalizeMetricLimit(params.maxLatency);
     const minSpeed = normalizeMetricLimit(params.minSpeed);
+    const untestedPolicy = params.untestedPolicy === 'include' || params.keepUntested === true || params.includeUntested === true
+        ? 'include'
+        : 'exclude';
 
     if (maxLatency !== null || minSpeed !== null) {
+        result = await hydrateRecordsFromSpeedTestCache(result, context, {
+            cacheTtlMinutes: params.cacheTtlMinutes ?? context?.speedTestCacheTtlMinutes
+        });
+
         // 调试日志：帮助排查 metadata 是否成功从测速算子流入 Filter。
         console.log('[Operator][Filter] input:', result.length,
             'latency(sample):', result.slice(0, 3).map(r => r?.metadata?.latency),
-            'maxLatency:', maxLatency, 'minSpeed:', minSpeed);
+            'maxLatency:', maxLatency, 'minSpeed:', minSpeed, 'untested:', untestedPolicy);
     }
 
     if (maxLatency !== null) {
         result = result.filter(r => {
             const latency = readSpeedMetric(r, 'latency');
-            return latency !== null && latency >= 0 && latency <= maxLatency;
+            if (latency === null) return untestedPolicy === 'include';
+            return latency >= 0 && latency <= maxLatency;
         });
     }
 
     if (minSpeed !== null) {
         result = result.filter(r => {
             const speed = readSpeedMetric(r, 'speed');
-            return speed !== null && speed >= minSpeed;
+            if (speed === null) return untestedPolicy === 'include';
+            return speed >= minSpeed;
         });
     }
 
@@ -371,7 +382,7 @@ export async function runOperatorChain(nodeUrls, operators, context = {}) {
 
         switch (type) {
             case 'filter':
-                records = opFilter(records, params);
+                records = await opFilter(records, params, enrichedContext);
                 break;
             case 'rename':
                 records = opRename(records, params);

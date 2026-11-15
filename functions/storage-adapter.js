@@ -610,6 +610,11 @@ export class D1StorageAdapter {
             if (String(key).startsWith('tsub_')) {
                 return { table: 'settings', queryField: 'key', queryValue: key };
             }
+            // Speed-test measurements are disposable cache rows stored in the
+            // key/value settings table (KV or D1).
+            if (String(key).startsWith('speedtest_cache_')) {
+                return { table: 'settings', queryField: 'key', queryValue: key };
+            }
             if (SYSTEM_STORAGE_KEYS.includes(String(key))) {
                 return { table: 'settings', queryField: 'key', queryValue: key };
             }

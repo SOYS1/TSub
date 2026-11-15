@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CLOUDFLARE_REAL_PING_ERROR,
   DEFAULT_SPEED_TEST_PARAMS,
@@ -6,6 +6,11 @@ import {
   normalizeSpeedTestParams,
   runSpeedTestOperator
 } from '../../functions/utils/speed-test.js';
+import {
+  buildSpeedTestCacheKey,
+  clearSpeedTestMemoryCache,
+  resolveSpeedTestCacheTtlMs
+} from '../../functions/utils/speed-test-cache.js';
 import { runOperatorChain } from '../../functions/utils/operator-runner.js';
 import { applySubscriptionOperators } from '../../functions/modules/subscription/source-operators.js';
 import { generateCombinedNodeList } from '../../functions/services/subscription-service.js';
@@ -26,6 +31,30 @@ function runnerFor(handlers) {
     async open(record, options) {
       return handlers.open(record, options);
     }
+  };
+}
+
+function memoryAdapter(initial = {}) {
+  const store = new Map(Object.entries(initial));
+  return {
+    store,
+    async get(key) {
+      return store.has(key) ? store.get(key) : null;
+    },
+    async put(key, value) {
+      store.set(key, value);
+      return true;
+    }
+  };
+}
+
+function cacheEntry(latency, overrides = {}) {
+  return {
+    latency,
+    speed: 0,
+    speedTestAt: new Date(Date.now() - 60_000).toISOString(),
+    speedTestMode: 'tcp',
+    ...overrides
   };
 }
 
@@ -437,5 +466,284 @@ describe('speed test metadata across generation stages', () => {
 
     expect(result).toContain('fast.example.com');
     expect(result).not.toContain('slow.example.com');
+  });
+});
+
+describe('speed test cache and progressive batching', () => {
+  beforeEach(() => {
+    clearSpeedTestMemoryCache();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearSpeedTestMemoryCache();
+  });
+
+  it('builds stable cache keys and resolves the TTL', () => {
+    expect(buildSpeedTestCacheKey(node('Cache.Example.com', 8443)))
+      .toBe('speedtest_cache_cache.example.com:8443');
+    expect(buildSpeedTestCacheKey({ server: '[2001:DB8::1]', port: 443 }))
+      .toBe('speedtest_cache_2001:db8::1:443');
+    expect(buildSpeedTestCacheKey({ server: '', port: 443 })).toBe('');
+    expect(resolveSpeedTestCacheTtlMs(30)).toBe(30 * 60 * 1000);
+    expect(resolveSpeedTestCacheTtlMs(0)).toBe(0);
+    expect(normalizeSpeedTestParams({}).cacheTtlMinutes).toBe(30);
+    expect(normalizeSpeedTestParams({ batchSize: 0 }).batchSize).toBe(1);
+  });
+
+  it('reuses a fresh cached result and never opens a socket', async () => {
+    const adapter = memoryAdapter({
+      [buildSpeedTestCacheKey(node('cached.example.com'))]: cacheEntry(40)
+    });
+    let connects = 0;
+
+    const result = await runSpeedTestOperator([node('cached.example.com')], {
+      testMode: 'tcp'
+    }, {
+      storage: adapter,
+      tcpConnect: async () => {
+        connects += 1;
+        return 10;
+      }
+    });
+
+    expect(connects).toBe(0);
+    expect(result[0].metadata).toMatchObject({
+      latency: 40,
+      speed: 0,
+      speedTestCached: true
+    });
+    expect(result[0].metadata.speedTestPending).toBeUndefined();
+  });
+
+  it('re-tests an expired cache entry and refreshes it', async () => {
+    const key = buildSpeedTestCacheKey(node('expired.example.com'));
+    const adapter = memoryAdapter({
+      [key]: cacheEntry(40, {
+        speedTestAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
+      })
+    });
+    let connects = 0;
+
+    const result = await runSpeedTestOperator([node('expired.example.com')], {
+      testMode: 'tcp'
+    }, {
+      storage: adapter,
+      tcpConnect: async () => {
+        connects += 1;
+        return 55;
+      }
+    });
+
+    expect(connects).toBe(1);
+    expect(result[0].metadata.latency).toBe(55);
+  });
+
+  it('writes measured results through waitUntil and respects the batch size', async () => {
+    const adapter = memoryAdapter();
+    const scheduled = [];
+    let connects = 0;
+
+    const records = [
+      node('batch-a.example.com'),
+      node('batch-b.example.com'),
+      node('batch-c.example.com')
+    ];
+
+    const result = await runSpeedTestOperator(records, {
+      testMode: 'tcp',
+      batchSize: 1
+    }, {
+      storage: adapter,
+      waitUntil: promise => scheduled.push(promise),
+      tcpConnect: async () => {
+        connects += 1;
+        return 20;
+      }
+    });
+
+    expect(connects).toBe(1);
+    expect(result[0].metadata.latency).toBe(20);
+    expect(result[1].metadata.speedTestPending).toBe(true);
+    expect(result[2].metadata.speedTestPending).toBe(true);
+    expect(result[1].metadata.latency).toBeUndefined();
+
+    expect(scheduled).toHaveLength(1);
+    await Promise.all(scheduled);
+    expect(adapter.store.has(buildSpeedTestCacheKey(records[0]))).toBe(true);
+    expect(adapter.store.has(buildSpeedTestCacheKey(records[1]))).toBe(false);
+  });
+
+  it('enforces Cloudflare concurrency 2 and a 1500ms timeout', async () => {
+    vi.stubGlobal('navigator', { userAgent: 'Cloudflare-Workers' });
+    expect(isCloudflareRuntime()).toBe(true);
+
+    let active = 0;
+    let maxActive = 0;
+    const timeouts = [];
+
+    const records = Array.from(
+      { length: 5 },
+      (_, index) => node(`cf-throttle-${index}.example.com`, 8388)
+    );
+
+    await runSpeedTestOperator(records, {
+      testMode: 'tcp',
+      concurrency: 16,
+      timeout: 30000
+    }, {
+      tcpConnect: async (host, port, timeoutMs) => {
+        timeouts.push(timeoutMs);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        active -= 1;
+        return 12;
+      }
+    });
+
+    expect(maxActive).toBe(2);
+    expect(timeouts).toHaveLength(5);
+    for (const timeoutMs of timeouts) {
+      expect(timeoutMs).toBeLessThanOrEqual(1500);
+      expect(timeoutMs).toBeGreaterThan(0);
+    }
+  });
+
+  it('tests at most 5 uncached nodes per Cloudflare run', async () => {
+    vi.stubGlobal('navigator', { userAgent: 'Cloudflare-Workers' });
+    let connects = 0;
+
+    const records = Array.from(
+      { length: 8 },
+      (_, index) => node(`cf-batch-${index}.example.com`, 8388)
+    );
+
+    const result = await runSpeedTestOperator(records, {
+      testMode: 'tcp',
+      concurrency: 8
+    }, {
+      tcpConnect: async () => {
+        connects += 1;
+        return 15;
+      }
+    });
+
+    expect(connects).toBe(5);
+    expect(result.filter(record => record.metadata.speedTestPending === true)).toHaveLength(3);
+    expect(result.filter(record => record.metadata.latency === 15)).toHaveLength(5);
+  });
+
+  it('skips real testing when a single run would plan more than 20 tests', async () => {
+    vi.stubGlobal('navigator', { userAgent: 'Cloudflare-Workers' });
+    let connects = 0;
+
+    const records = Array.from(
+      { length: 26 },
+      (_, index) => node(`cf-safety-${index}.example.com`, 8388)
+    );
+
+    const result = await runSpeedTestOperator(records, {
+      testMode: 'tcp',
+      batchSize: 25
+    }, {
+      tcpConnect: async () => {
+        connects += 1;
+        return 15;
+      }
+    });
+
+    expect(connects).toBe(0);
+    for (const record of result) {
+      expect(record.metadata.speedTestPending).toBe(true);
+      expect(record.metadata.speedTestDeferredReason).toBe('speed_test_safety_threshold');
+    }
+  });
+
+  it('advances through a large node list across successive runs', async () => {
+    const adapter = memoryAdapter();
+    const records = Array.from(
+      { length: 6 },
+      (_, index) => node(`progressive-${index}.example.com`, 8388)
+    );
+    const testedHosts = [];
+
+    const runOnce = () => runSpeedTestOperator(records, {
+      testMode: 'tcp',
+      batchSize: 2
+    }, {
+      storage: adapter,
+      tcpConnect: async (host) => {
+        testedHosts.push(host);
+        return 11;
+      }
+    });
+
+    await runOnce();
+    await runOnce();
+    await runOnce();
+
+    expect(testedHosts).toEqual([
+      'progressive-0.example.com',
+      'progressive-1.example.com',
+      'progressive-2.example.com',
+      'progressive-3.example.com',
+      'progressive-4.example.com',
+      'progressive-5.example.com'
+    ]);
+    expect(adapter.store.size).toBe(6);
+  });
+
+  it('serves cached real-mode results on Cloudflare instead of failing fast', async () => {
+    vi.stubGlobal('navigator', { userAgent: 'Cloudflare-Workers' });
+    const adapter = memoryAdapter({
+      [buildSpeedTestCacheKey(node('cf-real-cached.example.com'))]: cacheEntry(33, {
+        speedTestMode: 'real'
+      })
+    });
+
+    const result = await runSpeedTestOperator([node('cf-real-cached.example.com')], {
+      testMode: 'real',
+      enableSpeedTest: true
+    }, { storage: adapter, speedTestRunner: null });
+
+    expect(result[0].metadata).toMatchObject({
+      latency: 33,
+      speedTestCached: true,
+      speedTestMode: 'real'
+    });
+    expect(result[0].metadata.latencyError).toBeUndefined();
+  });
+
+  it('lets a filter-only chain read measurements from the cache', async () => {
+    const adapter = memoryAdapter({
+      [buildSpeedTestCacheKey(node('cached-fast.example.com'))]: cacheEntry(50),
+      [buildSpeedTestCacheKey(node('cached-slow.example.com'))]: cacheEntry(900)
+    });
+
+    const records = await runOperatorChain([
+      node('cached-fast.example.com'),
+      node('cached-slow.example.com')
+    ], [
+      { type: 'filter', params: { maxLatency: 200 } }
+    ], { storage: adapter, returnRecords: true });
+
+    expect(records).toHaveLength(1);
+    expect(records[0].server).toBe('cached-fast.example.com');
+    expect(records[0].metadata.speedTestCached).toBe(true);
+  });
+
+  it('honours the untested policy when no measurement exists', async () => {
+    const urls = [node('untested-policy.example.com').url];
+
+    const excluded = await runOperatorChain(urls, [
+      { type: 'filter', params: { maxLatency: 200 } }
+    ]);
+    expect(excluded).toHaveLength(0);
+
+    const included = await runOperatorChain(urls, [
+      { type: 'filter', params: { maxLatency: 200, untestedPolicy: 'include' } }
+    ]);
+    expect(included).toHaveLength(1);
   });
 });

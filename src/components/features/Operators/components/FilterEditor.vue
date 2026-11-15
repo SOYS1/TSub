@@ -20,7 +20,8 @@ const params = computed({
     protocols: { enabled: false, values: [], ...props.modelValue.protocols },
     regions: { enabled: false, values: [], ...props.modelValue.regions },
     maxLatency: props.modelValue.maxLatency ?? null,
-    minSpeed: props.modelValue.minSpeed ?? null
+    minSpeed: props.modelValue.minSpeed ?? null,
+    untestedPolicy: props.modelValue.untestedPolicy === 'include' ? 'include' : 'exclude'
   }),
   set: (val) => emit('update:modelValue', val)
 });
@@ -209,6 +210,17 @@ const toggleValue = (type, value) => {
             placeholder="500"
             class="w-full rounded-lg border border-transparent bg-white px-3 py-1.5 text-[11px] outline-none transition-all focus:border-indigo-500/30 dark:bg-gray-800"
           />
+        </div>
+        <div class="space-y-1 sm:col-span-2">
+          <label class="px-1 text-[10px] font-medium text-gray-500">{{ t('operators.filterUntestedPolicy') }}</label>
+          <select
+            :value="params.untestedPolicy"
+            @change="updateParam('untestedPolicy', $event.target.value)"
+            class="w-full rounded-lg border border-transparent bg-white px-3 py-1.5 text-[11px] outline-none transition-all focus:border-indigo-500/30 dark:bg-gray-800"
+          >
+            <option value="exclude">{{ t('operators.filterUntestedExclude') }}</option>
+            <option value="include">{{ t('operators.filterUntestedInclude') }}</option>
+          </select>
         </div>
       </div>
       <p class="px-1 text-[10px] text-gray-400">{{ t('operators.performanceFilterHint') }}</p>

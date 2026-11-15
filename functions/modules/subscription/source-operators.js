@@ -88,6 +88,8 @@ export async function applySubscriptionOperators(nodes, subscription, options = 
             speedTestRunner: options.speedTestRunner,
             tcpConnect: options.tcpConnect,
             nodeMetadataByUrl: options.nodeMetadataByUrl,
+            storage: options.storage,
+            waitUntil: options.waitUntil,
             returnRecords: true
         });
 

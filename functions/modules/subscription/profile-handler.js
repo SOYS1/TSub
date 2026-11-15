@@ -149,7 +149,7 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
             url: effectiveUrl,
             subscriptionName: node.name || '手工节点',
             group: node.group || ''
-        }], node, { config: settings, userAgent, env });
+        }], node, { config: settings, userAgent, env, storage: storageAdapter });
         const primaryNode = operatedNodes[0] || {};
         const finalUrl = primaryNode.url || effectiveUrl;
 
@@ -177,7 +177,8 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
             result.nodes = await applySubscriptionOperators(result.nodes, sub, {
                 config: settings,
                 userAgent,
-                env
+                env,
+                storage: storageAdapter
             });
         }
         return result;
@@ -239,6 +240,7 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
                 config: settings,
                 nodeMetadataByUrl,
                 env,
+                storage: storageAdapter,
                 returnRecords: true
             });
             transformedUrls = transformedRecords.map(record => record.url);

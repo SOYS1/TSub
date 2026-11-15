@@ -10,10 +10,22 @@
  * This module never removes nodes and never changes their names. It only
  * writes `metadata.latency` (ms, -1 on failure) and `metadata.speed` (KB/s).
  *
- * Every node always leaves this operator with a numeric `metadata.latency`.
+ * Measured nodes leave with a numeric `metadata.latency`. Nodes whose
+ * measurement was postponed to a later run (progressive batching) keep their
+ * previous metadata and are flagged with `metadata.speedTestPending`.
  * Cloudflare Workers / Pages can only run layer 1 (`cloudflare:sockets`);
  * layers 2 and 3 need the self-hosted proxy-core runner.
  */
+
+import {
+    DEFAULT_CACHE_TTL_MINUTES,
+    MAX_CACHE_TTL_MINUTES,
+    applySpeedTestCacheEntry,
+    buildSpeedTestCacheKey,
+    collectSpeedTestCacheEntries,
+    dispatchSpeedTestCacheWrite,
+    readSpeedTestCache
+} from './speed-test-cache.js';
 
 export const DEFAULT_SPEED_TEST_PARAMS = Object.freeze({
     testMode: 'real',
@@ -21,13 +33,25 @@ export const DEFAULT_SPEED_TEST_PARAMS = Object.freeze({
     enableSpeedTest: false,
     speedTestUrl: 'https://speed.cloudflare.com/__down?bytes=10000000',
     timeout: 8000,
-    concurrency: 8
+    concurrency: 8,
+    // Progressive testing + cache. See the comments below for why these are
+    // enforced in the Cloudflare runtime.
+    cacheTtlMinutes: DEFAULT_CACHE_TTL_MINUTES,
+    batchSize: 5,
+    maxUncachedPerRun: 20
 });
 
 export const CLOUDFLARE_REAL_PING_ERROR = 'cloudflare_env_does_not_support_real_ping';
 
 const MAX_TIMEOUT = 120_000;
 const MAX_CONCURRENCY = 32;
+const MAX_BATCH_SIZE = 50;
+const MAX_UNCACHED_PER_RUN = 500;
+
+// Hard ceilings for the Cloudflare runtime. A subscription refresh must never
+// look like a port scan, no matter what the operator config says.
+const CLOUDFLARE_MAX_CONCURRENCY = 2;
+const CLOUDFLARE_MAX_TIMEOUT = 1500;
 
 function clampInteger(value, fallback, min, max) {
     const parsed = Number.parseInt(value, 10);
@@ -54,7 +78,52 @@ export function normalizeSpeedTestParams(params = {}) {
         enableSpeedTest: source.enableSpeedTest === true,
         speedTestUrl: normalizeUrl(source.speedTestUrl, DEFAULT_SPEED_TEST_PARAMS.speedTestUrl),
         timeout: clampInteger(source.timeout, DEFAULT_SPEED_TEST_PARAMS.timeout, 1, MAX_TIMEOUT),
-        concurrency: clampInteger(source.concurrency, DEFAULT_SPEED_TEST_PARAMS.concurrency, 1, MAX_CONCURRENCY)
+        concurrency: clampInteger(source.concurrency, DEFAULT_SPEED_TEST_PARAMS.concurrency, 1, MAX_CONCURRENCY),
+        cacheTtlMinutes: clampInteger(
+            source.cacheTtlMinutes,
+            DEFAULT_SPEED_TEST_PARAMS.cacheTtlMinutes,
+            1,
+            MAX_CACHE_TTL_MINUTES
+        ),
+        batchSize: clampInteger(source.batchSize, DEFAULT_SPEED_TEST_PARAMS.batchSize, 1, MAX_BATCH_SIZE),
+        maxUncachedPerRun: clampInteger(
+            source.maxUncachedPerRun,
+            DEFAULT_SPEED_TEST_PARAMS.maxUncachedPerRun,
+            1,
+            MAX_UNCACHED_PER_RUN
+        )
+    };
+}
+
+function hasExplicitParam(params, key) {
+    if (!params || typeof params !== 'object' || !Object.prototype.hasOwnProperty.call(params, key)) return false;
+    const value = params[key];
+    return value !== undefined && value !== null && value !== '';
+}
+
+/**
+ * Resolve the runtime limits for one operator execution.
+ *
+ * Cloudflare always enforces concurrency <= 2, timeout <= 1500ms and the
+ * progressive batch/safety caps. Self-hosted controllers keep their full
+ * concurrency unless the operator explicitly opts into batching.
+ *
+ * `maxUncachedPerRun` caps the number of nodes a *single run* may test
+ * (`plannedCount`), not the size of the whole uncached backlog: with the
+ * default batch of 5 a 100-node list is measured progressively instead of
+ * being abandoned forever.
+ */
+function resolveEffectiveLimits(options, params, cloudflare) {
+    const progressive = Boolean(cloudflare)
+        || hasExplicitParam(params, 'batchSize')
+        || hasExplicitParam(params, 'maxUncachedPerRun');
+
+    return {
+        cloudflare: Boolean(cloudflare),
+        timeout: cloudflare ? Math.min(options.timeout, CLOUDFLARE_MAX_TIMEOUT) : options.timeout,
+        concurrency: cloudflare ? Math.min(options.concurrency, CLOUDFLARE_MAX_CONCURRENCY) : options.concurrency,
+        batchSize: progressive ? options.batchSize : null,
+        maxUncachedPerRun: progressive ? options.maxUncachedPerRun : null
     };
 }
 
@@ -442,74 +511,213 @@ async function testNode(record, options, context) {
 }
 
 /**
- * Run the layered speed-test operator over records.
+ * Mark a record whose measurement was postponed to a later run.
  *
- * @param {Array<Object>} records
- * @param {Object} params
- * @param {Object} context - may provide `speedTestRunner`, `tcpConnect`, `env`.
- * @returns {Promise<Array<Object>>}
+ * Previous measurements are preserved (never overwritten with -1) so a node
+ * that is simply waiting for its batch does not get filtered out by accident.
  */
-export async function runSpeedTestOperator(records, params = {}, context = {}) {
-    if (!Array.isArray(records) || records.length === 0) return records || [];
+function markDeferredResult(record, reason) {
+    return {
+        ...record,
+        metadata: {
+            ...(record?.metadata || {}),
+            speedTestPending: true,
+            speedTestDeferredReason: reason
+        }
+    };
+}
 
-    const options = normalizeSpeedTestParams(params);
+function applyStaleCacheEntry(record, entry) {
+    const applied = applySpeedTestCacheEntry(record, entry);
+    const metadata = {
+        ...(applied?.metadata || record?.metadata || {}),
+        speedTestCached: true,
+        speedTestStale: true
+    };
+    delete metadata.speedTestPending;
+    delete metadata.speedTestDeferredReason;
+    return { ...applied, metadata };
+}
 
-    // Cloudflare Workers / Pages cannot spawn a proxy core. Intercept real
-    // ping at the entrance and fail fast instead of burning CPU per node.
-    if (options.testMode === 'real' && isCloudflareRuntime() && !resolveRunner(context)) {
-        const testedAt = new Date().toISOString();
-        return records.map(record => {
-            const metadata = {
-                ...(record?.metadata || {}),
-                latency: -1,
-                speed: 0,
-                speedTestMode: 'real',
-                speedTestAt: testedAt,
-                speedTestElapsedMs: 0,
-                latencyError: CLOUDFLARE_REAL_PING_ERROR
-            };
-            if (options.enableSpeedTest) {
-                metadata.speedError = CLOUDFLARE_REAL_PING_ERROR;
-            } else {
-                delete metadata.speedError;
-            }
-            return { ...record, metadata };
-        });
+/** Existing Cloudflare behaviour: real ping is impossible, report it fast. */
+function markUnavailableResult(record, options, testedAt) {
+    const metadata = {
+        ...(record?.metadata || {}),
+        latency: -1,
+        speed: 0,
+        speedTestMode: 'real',
+        speedTestAt: testedAt,
+        speedTestElapsedMs: 0,
+        latencyError: CLOUDFLARE_REAL_PING_ERROR
+    };
+    if (options.enableSpeedTest) {
+        metadata.speedError = CLOUDFLARE_REAL_PING_ERROR;
+    } else {
+        delete metadata.speedError;
     }
+    delete metadata.speedTestPending;
+    delete metadata.speedTestDeferredReason;
+    return { ...record, metadata };
+}
 
-    const results = new Array(records.length);
+/**
+ * Test a bounded list of nodes and write the measured records into `results`.
+ * `tested` collects the metadata that must be persisted to the cache.
+ */
+async function runTestBatch(items, results, tested, options, context) {
     let cursor = 0;
 
     const worker = async () => {
         for (;;) {
             const index = cursor;
             cursor += 1;
-            if (index >= records.length) return;
+            if (index >= items.length) return;
+
+            const { index: resultIndex, record } = items[index];
             try {
-                results[index] = await testNode(records[index], options, context);
+                const measured = await testNode(record, options, context);
+                results[resultIndex] = measured;
+                tested.push({ record: measured, metadata: measured.metadata });
             } catch (error) {
                 // Defensive isolation: a bug in one node's test must never
                 // abort the whole operator chain or the other workers.
-                const record = records[index] || {};
-                results[index] = {
-                    ...record,
-                    metadata: {
-                        ...(record.metadata || {}),
-                        latency: -1,
-                        speed: 0,
-                        speedTestMode: options.testMode,
-                        speedTestAt: new Date().toISOString(),
-                        speedTestElapsedMs: 0,
-                        latencyError: error?.message || 'speed_test_failed'
-                    }
+                const metadata = {
+                    ...(record?.metadata || {}),
+                    latency: -1,
+                    speed: 0,
+                    speedTestMode: options.testMode,
+                    speedTestAt: new Date().toISOString(),
+                    speedTestElapsedMs: 0,
+                    latencyError: error?.message || 'speed_test_failed'
                 };
+                results[resultIndex] = { ...record, metadata };
+                tested.push({ record, metadata });
             }
         }
     };
 
-    const workerCount = Math.min(options.concurrency, records.length);
+    const workerCount = Math.max(1, Math.min(options.concurrency, items.length));
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
 
-    // Final safety net: guarantee every node carries a numeric latency.
-    return results.map((record, index) => ensureMeasuredResult(record, records[index], options));
+/**
+ * Run the layered speed-test operator over records.
+ *
+ * Cached measurements (default TTL 30 minutes) skip real testing entirely.
+ * Uncached nodes are tested in bounded batches, and Cloudflare runs are forced
+ * to concurrency 2 / 1500ms with a hard 20-node safety valve.
+ *
+ * @param {Array<Object>} records
+ * @param {Object} params
+ * @param {Object} context - may provide `speedTestRunner`, `tcpConnect`, `env`,
+ *   `storage` / `storageAdapter`, `waitUntil`.
+ * @returns {Promise<Array<Object>>}
+ */
+export async function runSpeedTestOperator(records, params = {}, context = {}) {
+    if (!Array.isArray(records) || records.length === 0) return records || [];
+
+    const options = normalizeSpeedTestParams(params);
+    const cloudflare = isCloudflareRuntime();
+    const limits = resolveEffectiveLimits(options, params, cloudflare);
+    const effectiveOptions = {
+        ...options,
+        timeout: limits.timeout,
+        concurrency: limits.concurrency
+    };
+
+    // Cache lookups are read-only and never open sockets. They are safe even
+    // for the fast-fail path below.
+    const cache = options.cacheTtlMinutes > 0
+        ? await readSpeedTestCache(records, context, options)
+        : new Map();
+
+    // Cloudflare Workers / Pages cannot spawn a proxy core. Serve cached
+    // results, then fail fast instead of burning CPU per node.
+    if (effectiveOptions.testMode === 'real' && cloudflare && !resolveRunner(context)) {
+        const testedAt = new Date().toISOString();
+        return records.map(record => {
+            const hit = cache.get(buildSpeedTestCacheKey(record));
+            if (hit?.entry) return applySpeedTestCacheEntry(record, hit.entry);
+            return markUnavailableResult(record, effectiveOptions, testedAt);
+        });
+    }
+
+    const results = new Array(records.length);
+    const pending = [];
+
+    records.forEach((record, index) => {
+        const key = buildSpeedTestCacheKey(record);
+        const hit = key ? cache.get(key) : null;
+        if (hit?.entry && hit.fresh) {
+            results[index] = applySpeedTestCacheEntry(record, hit.entry);
+            return;
+        }
+        pending.push({ index, record, stale: hit?.entry || null });
+    });
+
+    const tested = [];
+
+    if (pending.length > 0) {
+        // Uncached nodes go first, then the oldest expired entries. Without
+        // this ordering a permanently failing node would occupy the batch
+        // forever and starve the nodes that were never measured.
+        pending.sort((a, b) => {
+            const aCached = a.stale ? 1 : 0;
+            const bCached = b.stale ? 1 : 0;
+            if (aCached !== bCached) return aCached - bCached;
+            if (aCached && bCached) {
+                return Date.parse(a.stale.speedTestAt) - Date.parse(b.stale.speedTestAt);
+            }
+            return a.index - b.index;
+        });
+
+        const plannedCount = limits.batchSize === null
+            ? pending.length
+            : Math.min(limits.batchSize, pending.length);
+
+        if (limits.maxUncachedPerRun !== null && plannedCount > limits.maxUncachedPerRun) {
+            // Safety valve: a single execution that would open more than
+            // `maxUncachedPerRun` sockets (misconfigured batch size, batching
+            // disabled) must not become a port scan. Serve stale cache only
+            // and never open a socket this run.
+            for (const item of pending) {
+                results[item.index] = item.stale
+                    ? applyStaleCacheEntry(item.record, item.stale)
+                    : markDeferredResult(item.record, 'speed_test_safety_threshold');
+            }
+        } else {
+            const selected = limits.batchSize === null
+                ? pending
+                : pending.slice(0, limits.batchSize);
+            const selectedIndexes = new Set(selected.map(item => item.index));
+
+            for (const item of pending) {
+                if (selectedIndexes.has(item.index)) continue;
+                // Not this round's batch: reuse stale data if we have any,
+                // otherwise leave the node untouched for the next refresh.
+                results[item.index] = item.stale
+                    ? applyStaleCacheEntry(item.record, item.stale)
+                    : markDeferredResult(item.record, 'speed_test_batch_deferred');
+            }
+
+            await runTestBatch(selected, results, tested, effectiveOptions, context);
+        }
+    }
+
+    if (tested.length > 0) {
+        const entries = collectSpeedTestCacheEntries(tested);
+        // KV writes run after the response through `waitUntil`. Without it
+        // (tests, self-hosted callers) await them so the data is not lost.
+        const writePromise = dispatchSpeedTestCacheWrite(entries, context);
+        if (writePromise) await writePromise;
+    }
+
+    // Final safety net: guarantee every measured node carries a numeric
+    // latency. Deferred nodes keep their original metadata on purpose.
+    return results.map((record, index) => {
+        const fallback = records[index];
+        if (!record) return ensureMeasuredResult(null, fallback, effectiveOptions);
+        if (record.metadata?.speedTestPending) return record;
+        return ensureMeasuredResult(record, fallback, effectiveOptions);
+    });
 }

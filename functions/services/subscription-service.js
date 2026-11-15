@@ -417,6 +417,9 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
                 speedTestRunner: context?.speedTestRunner,
                 tcpConnect: context?.tcpConnect,
                 nodeMetadataByUrl: context?.nodeMetadataByUrl,
+                // 测速结果缓存需要请求级存储适配器与 waitUntil 异步写入能力。
+                storage: context?.storage,
+                waitUntil: context?.waitUntil,
                 returnRecords: true
             });
             // 订阅源级测速结果需要跨阶段保留，供订阅组级 Filter 使用。
@@ -658,6 +661,8 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
             // 订阅源级测速得到的 metadata 以 URL / server:port 为键缓存，
             // 在这里重新水合，避免字符串聚合阶段丢失 latency。
             nodeMetadataByUrl: context?.nodeMetadataByUrl,
+            storage: context?.storage,
+            waitUntil: context?.waitUntil,
             returnRecords: true
         });
         rememberOperatorMetadata(context, transformedRecords);
@@ -917,6 +922,8 @@ async function applySubscriptionTransforms(nodeUrls, sub, context = null) {
             speedTestRunner: context?.speedTestRunner,
             tcpConnect: context?.tcpConnect,
             nodeMetadataByUrl: context?.nodeMetadataByUrl,
+            storage: context?.storage,
+            waitUntil: context?.waitUntil,
             returnRecords: true
         });
         rememberOperatorMetadata(context, transformedRecords);

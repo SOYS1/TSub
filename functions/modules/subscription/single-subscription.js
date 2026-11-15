@@ -41,7 +41,7 @@ export async function handleSingleSubscriptionMode(request, env, subscriptionId,
                 ...nodeInfo,
                 url: subscription.url,
                 subscriptionName: subscription.name || '手工节点'
-            }], subscription, { config: settings, userAgent, env })
+            }], subscription, { config: settings, userAgent, env, storage: storageAdapter })
             : [{ ...nodeInfo, url: subscription.url, subscriptionName: subscription.name || '手工节点' }];
         const manualNodeResult = {
             subscriptionName: subscription.name || '手工节点',
@@ -81,7 +81,8 @@ export async function handleSingleSubscriptionMode(request, env, subscriptionId,
         ? await applySubscriptionOperators(result.nodes, subscription, {
             config: settings,
             userAgent,
-            env
+            env,
+            storage: storageAdapter
         })
         : result.nodes;
 
