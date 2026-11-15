@@ -7,6 +7,7 @@ export default defineConfig({
         globals: true,
         environment: 'jsdom',
         passWithNoTests: true,
+        setupFiles: ['./tests/setup/i18n.js'],
         include: ['tests/unit/**/*.{test,spec}.{js,ts}'],
         coverage: {
             provider: 'v8',

@@ -31,11 +31,11 @@ describe('批量导入去重', () => {
     });
   });
 
-  it('应避免重复导入已存在的标准URL节点', () => {
+  it('应避免重复导入已存在的标准URL节点', async () => {
     const importText = `ss://existing@server1.com:443
 ss://new@server2.com:8388`;
 
-    bulkImport.handleBulkImport(importText, '');
+    await bulkImport.handleBulkImport(importText, '');
 
     // 应该只添加了新节点，已存在的被跳过
     const allNodes = dataStore.subscriptions.filter(s => /^ss:\/\//.test(s.url));
@@ -49,12 +49,12 @@ ss://new@server2.com:8388`;
     expect(urls).toContain('ss://new@server2.com:8388');
   });
 
-  it('应避免重复导入已存在的Surge格式节点', () => {
+  it('应避免重复导入已存在的Surge格式节点', async () => {
     // 已存在节点的Surge表示
     const importText = `ExistingNode = ss, server1.com, 443, encrypt-method=chacha20-ietf-poly1305, password=existing
 NewNode = ss, server3.com, 8388, encrypt-method=aes-256-gcm, password=newpass`;
 
-    bulkImport.handleBulkImport(importText, '');
+    await bulkImport.handleBulkImport(importText, '');
 
     // server1.com:443 已存在，不应重复添加
     const allNodes = dataStore.subscriptions.filter(s => s.url && /^ss:\/\//.test(s.url));
@@ -64,13 +64,13 @@ NewNode = ss, server3.com, 8388, encrypt-method=aes-256-gcm, password=newpass`;
     expect(server1Nodes.length).toBeLessThanOrEqual(2); // 原有 1 个 + 可能误判添加 1 个
   });
 
-  it('混合导入标准URL和Surge格式时应正确去重', () => {
+  it('混合导入标准URL和Surge格式时应正确去重', async () => {
     const importText = `ss://existing@server1.com:443
 NewSurge = ss, server4.com, 9000, encrypt-method=aes-256-gcm, password=test
 ss://new@server5.com:10000`;
 
     const initialCount = dataStore.subscriptions.length;
-    bulkImport.handleBulkImport(importText, '');
+    await bulkImport.handleBulkImport(importText, '');
 
     // 应该只添加 2 个新节点（NewSurge 和 server5）
     expect(dataStore.subscriptions.length).toBe(initialCount + 2);

@@ -11,7 +11,10 @@ import {
   t
 } from '../../src/i18n/index.js';
 import LanguageSwitcher from '../../src/components/layout/LanguageSwitcher.vue';
-import { messages } from '../../src/i18n/messages.js';
+import zhCN from '../../src/i18n/locales/zh-CN.js';
+import enUS from '../../src/i18n/locales/en-US.js';
+
+const messages = { 'zh-CN': zhCN, 'en-US': enUS };
 
 const routerLinkStub = {
   props: ['to'],

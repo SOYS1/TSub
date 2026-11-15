@@ -4,7 +4,7 @@ import './assets/main.css'
 import App from './App.vue'
 import router from './router'
 import { handleError, setToastHandler, configureErrorMonitoring } from './utils/errorHandler.js'
-import { i18n } from './i18n/index.js'
+import { i18n, i18nReady } from './i18n/index.js'
 import { useToastStore } from './stores/toast.js'
 
 // 全局错误处理
@@ -139,7 +139,16 @@ const toastStore = useToastStore(pinia)
 setToastHandler(toastStore.showToast)
 configureErrorMonitoring({ endpoint: import.meta.env.VITE_ERROR_REPORT_URL })
 app.use(router) // Use Router
-app.mount('#app')
+
+// Wait for the active locale bundle before the first paint so the UI never
+// flashes raw translation keys. The import is cached, so this only costs a
+// single dynamic chunk fetch on cold load.
+async function bootstrap() {
+  await i18nReady;
+  app.mount('#app');
+}
+
+bootstrap();
 
 const loadWebFonts = () => {
   if (document.querySelector('link[data-tsub-web-fonts]')) return;

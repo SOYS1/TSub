@@ -15,13 +15,11 @@ vi.stubGlobal('btoa', (str) => Buffer.from(str).toString('base64'))
 vi.stubGlobal('atob', (str) => Buffer.from(str, 'base64').toString())
 
 // 导入被测试模块
-import {
-    convertClashProxyToUrl,
-    parseClientConfig,
-    parseLoonConfig,
-    parseSurgeConfig,
-    parseQuantumultXConfig
-} from '../../src/utils/protocolConverter.js'
+import { convertClashProxyToUrl } from '../../src/utils/protocolConverter.js'
+import { parseClientConfig } from '../../src/utils/protocols/client-loader.js'
+import { parseLoonConfig } from '../../src/utils/protocols/loon-parser.js'
+import { parseSurgeConfig } from '../../src/utils/protocols/surge-parser.js'
+import { parseQuantumultXConfig } from '../../src/utils/protocols/quantumultx-parser.js'
 
 describe('protocolConverter', () => {
     describe('convertClashProxyToUrl', () => {
@@ -387,11 +385,11 @@ anytls=Test AnyTLS, anytls.example.com, 443, password=anytls-pass, sni=example.c
     })
 
     describe('parseClientConfig', () => {
-        it('应自动识别 Surge / Loon / QX 配置', () => {
-            const surge = parseClientConfig('[Proxy]\nss=Test SS,1.2.3.4,8388,aes-256-gcm,password123')
-            const loon = parseClientConfig('[Proxy]\nTest SS = Shadowsocks, 1.2.3.4, 8388, aes-128-gcm, password123')
-            const quanx = parseClientConfig('[server_local]\nshadowsocks=Test SS, 1.2.3.4, 443, aes-128-gcm, password')
-            const surgeWireguard = parseClientConfig('[Proxy]\nWG-Test = wireguard, 1.2.3.4, 51820, private-key=test-private, peer-public-key=test-peer')
+        it('应自动识别 Surge / Loon / QX 配置', async () => {
+            const surge = await parseClientConfig('[Proxy]\nss=Test SS,1.2.3.4,8388,aes-256-gcm,password123')
+            const loon = await parseClientConfig('[Proxy]\nTest SS = Shadowsocks, 1.2.3.4, 8388, aes-128-gcm, password123')
+            const quanx = await parseClientConfig('[server_local]\nshadowsocks=Test SS, 1.2.3.4, 443, aes-128-gcm, password')
+            const surgeWireguard = await parseClientConfig('[Proxy]\nWG-Test = wireguard, 1.2.3.4, 51820, private-key=test-private, peer-public-key=test-peer')
 
             expect(surge.client).toBe('surge')
             expect(loon.client).toBe('loon')
@@ -403,8 +401,8 @@ anytls=Test AnyTLS, anytls.example.com, 443, password=anytls-pass, sni=example.c
             expect(surgeWireguard.nodes.length).toBeGreaterThan(0)
         })
 
-        it('应解析 Loon AnyTLS 配置', () => {
-            const loon = parseClientConfig('[Proxy]\nAnyTLS-HK = anytls, 156.239.232.67, 443, password123, sni=example.com, alpn=h2,h3, skip-cert-verify=true')
+        it('应解析 Loon AnyTLS 配置', async () => {
+            const loon = await parseClientConfig('[Proxy]\nAnyTLS-HK = anytls, 156.239.232.67, 443, password123, sni=example.com, alpn=h2,h3, skip-cert-verify=true')
 
             expect(loon.client).toBe('loon')
             expect(loon.nodes).toHaveLength(1)

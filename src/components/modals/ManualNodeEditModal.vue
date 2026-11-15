@@ -8,7 +8,7 @@ import { useSubscriptions } from '../../composables/useSubscriptions.js';
 import { useBulkImportLogic } from '../../composables/useBulkImportLogic.js';
 import { useManualNodes } from '../../composables/useManualNodes.js';
 import { useI18n } from '../../i18n/index.js';
-import { parseSurgeConfig } from '../../utils/protocolConverter.js';
+import { looksLikeSurgeConfig, parseSurgeConfigAsync } from '../../utils/protocols/client-loader.js';
 
 const props = defineProps({
   show: Boolean,
@@ -110,31 +110,37 @@ const applySuggestedName = () => {
   }
 };
 
-const handleConfirm = () => {
-  if (props.isNew && isMultiLine.value) {
-    // Pass group if specified (though bulk import logic might need update to support group, currently logic is simple)
-    // Actually handleBulkImport second arg was colorTag. Now it should be group.
-    // Let's check handleBulkImport usage.
-    // Line 107 in original: handleBulkImport(props.editingNode.url, props.editingNode.colorTag);
-    // Depending on useBulkImportLogic, we might need to update it too.
-    // For now, let's assume we pass group.
-    handleBulkImport(props.editingNode.url, props.editingNode.group);
-    emit('update:show', false);
-    return;
-  }
+const isParsing = ref(false);
 
-  // 单行模式下检测 Surge 配置格式并自动转换
-  if (props.isNew && !isMultiLine.value && props.editingNode?.url) {
-    const surgeNodes = parseSurgeConfig(props.editingNode.url);
-    if (surgeNodes && surgeNodes.length === 1) {
-      props.editingNode.url = surgeNodes[0].url;
-      if (!props.editingNode.name && surgeNodes[0].name) {
-        props.editingNode.name = surgeNodes[0].name;
+const handleConfirm = async () => {
+  if (isParsing.value) return;
+  isParsing.value = true;
+  try {
+    if (props.isNew && isMultiLine.value) {
+      // Bulk import loads the Surge parser on demand and may need to fetch a
+      // chunk, so keep the modal open until it finishes.
+      await handleBulkImport(props.editingNode.url, props.editingNode.group);
+      emit('update:show', false);
+      return;
+    }
+
+    // 单行模式下检测 Surge 配置格式并自动转换。
+    // 普通分享链接无需下载 Surge 解析器 chunk。
+    if (props.isNew && !isMultiLine.value && props.editingNode?.url
+      && looksLikeSurgeConfig(props.editingNode.url)) {
+      const surgeNodes = await parseSurgeConfigAsync(props.editingNode.url);
+      if (surgeNodes && surgeNodes.length === 1) {
+        props.editingNode.url = surgeNodes[0].url;
+        if (!props.editingNode.name && surgeNodes[0].name) {
+          props.editingNode.name = surgeNodes[0].name;
+        }
       }
     }
-  }
 
-  emit('confirm');
+    emit('confirm');
+  } finally {
+    isParsing.value = false;
+  }
 };
 
 // 颜色映射到 Tailwind 类
@@ -167,6 +173,9 @@ const protocolColorMap = {
     v-if="editingNode"
     :show="show"
     size="2xl"
+    :close-on-confirm="false"
+    :confirm-disabled="isParsing"
+    :confirm-text="isParsing ? t('common.loading') : ''"
     @update:show="emit('update:show', $event)"
     @confirm="handleConfirm"
   >

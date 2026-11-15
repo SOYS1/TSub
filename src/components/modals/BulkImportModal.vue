@@ -11,6 +11,12 @@ const { manualNodeGroups } = useManualNodes(useDataStore().markDirty);
 
 const props = defineProps({
   show: Boolean,
+  // Optional async handler. When provided the modal awaits it so the parser
+  // chunk can load while the confirm button shows a loading state.
+  importHandler: {
+    type: Function,
+    default: null
+  }
 });
 
 const emit = defineEmits(['update:show', 'import']);
@@ -18,19 +24,36 @@ const emit = defineEmits(['update:show', 'import']);
 const importText = ref('');
 const selectedGroup = ref('');
 const urlFocused = ref(false);
+const isImporting = ref(false);
 
-const handleConfirm = () => {
-    emit('import', importText.value, selectedGroup.value); // group passed as second arg
-    importText.value = '';
-    selectedGroup.value = '';
-    setTimeout(() => {
+const handleConfirm = async () => {
+    if (isImporting.value) return;
+    const text = importText.value;
+    const group = selectedGroup.value;
+
+    isImporting.value = true;
+    try {
+        if (props.importHandler) {
+            await props.importHandler(text, group);
+        } else {
+            emit('import', text, group);
+        }
+        importText.value = '';
+        selectedGroup.value = '';
         emit('update:show', false);
-    }, 1000);
+    } catch (error) {
+        console.error('[BulkImportModal] Import failed', error);
+    } finally {
+        isImporting.value = false;
+    }
 };
 </script>
 
 <template>
-  <Modal :show="show" @update:show="emit('update:show', $event)" @confirm="handleConfirm" size="2xl">
+  <Modal :show="show" @update:show="emit('update:show', $event)" @confirm="handleConfirm" size="2xl"
+    :close-on-confirm="false"
+    :confirm-disabled="isImporting"
+    :confirm-text="isImporting ? t('common.loading') : ''">
     <template #title>
       <div class="flex items-center gap-3">
         <div class="p-2 tsub-radius-lg bg-indigo-500/10">
@@ -82,6 +105,7 @@ const handleConfirm = () => {
               <textarea 
                 v-model="importText"
                 rows="8"
+                :disabled="isImporting"
                 @focus="urlFocused = true"
                 @blur="urlFocused = false"
                 class="flex-1 w-full bg-transparent border-0 focus:ring-0 dark:text-white placeholder-gray-400 text-sm font-mono resize-none py-3 px-3 min-h-[160px]"

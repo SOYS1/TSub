@@ -4,7 +4,10 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import SettingsSidebar from '../../src/components/settings/SettingsSidebar.vue';
 import { createI18n } from '../../src/i18n/index.js';
-import { messages } from '../../src/i18n/messages.js';
+import zhCN from '../../src/i18n/locales/zh-CN.js';
+import enUS from '../../src/i18n/locales/en-US.js';
+
+const messages = { 'zh-CN': zhCN, 'en-US': enUS };
 
 describe('navigation and settings layout', () => {
   it('uses subscription and node management names in both locales', () => {

@@ -1,5 +1,4 @@
-import { computed, inject, readonly, ref } from 'vue';
-import { messages } from './messages.js';
+import { computed, inject, readonly, ref, shallowReactive } from 'vue';
 
 export const DEFAULT_LOCALE = 'zh-CN';
 export const LOCALE_STORAGE_KEY = 'tsub:locale';
@@ -10,6 +9,21 @@ export const SUPPORTED_LOCALES = [
 
 const supportedCodes = new Set(SUPPORTED_LOCALES.map((item) => item.code));
 const I18N_KEY = Symbol('tsub-i18n');
+
+/**
+ * Locale bundles are code-split so the entry chunk only carries the active
+ * language. The loaders are lazy `import()` calls, which Vite turns into
+ * separate chunks fetched on demand.
+ */
+const localeLoaders = {
+  'zh-CN': () => import('./locales/zh-CN.js'),
+  'en-US': () => import('./locales/en-US.js')
+};
+
+// shallowReactive keeps the bundles themselves untouched while letting Vue
+// re-render templates once a lazily loaded locale lands.
+const loadedMessages = shallowReactive({});
+const localeLoadPromises = new Map();
 
 function canUseLocalStorage() {
   return typeof localStorage !== 'undefined';
@@ -58,11 +72,52 @@ export function detectInitialLocale(browserLanguages = []) {
   return DEFAULT_LOCALE;
 }
 
+function extractMessages(module) {
+  return module?.default ?? module?.messages ?? {};
+}
+
+/**
+ * Load (and memoize) a locale bundle. Safe to call repeatedly: concurrent
+ * callers share the same in-flight promise.
+ */
+export function loadLocaleMessages(locale) {
+  const normalized = normalizeLocale(locale);
+  if (loadedMessages[normalized]) return Promise.resolve(loadedMessages[normalized]);
+
+  const inFlight = localeLoadPromises.get(normalized);
+  if (inFlight) return inFlight;
+
+  const loader = localeLoaders[normalized];
+  if (!loader) return Promise.resolve({});
+
+  const promise = loader()
+    .then((module) => {
+      const bundle = extractMessages(module);
+      loadedMessages[normalized] = bundle;
+      return bundle;
+    })
+    .catch((error) => {
+      // Allow a later attempt to retry instead of caching the failure forever.
+      localeLoadPromises.delete(normalized);
+      console.warn(`[i18n] Failed to load locale "${normalized}"`, error);
+      return {};
+    });
+
+  localeLoadPromises.set(normalized, promise);
+  return promise;
+}
+
+export function isLocaleLoaded(locale) {
+  return Boolean(loadedMessages[normalizeLocale(locale)]);
+}
+
 function lookupMessage(locale, key) {
+  const bundle = loadedMessages[locale];
+  if (!bundle) return undefined;
   return key.split('.').reduce((current, part) => {
     if (!current || typeof current !== 'object') return undefined;
     return current[part];
-  }, messages[locale]);
+  }, bundle);
 }
 
 function interpolate(template, params = {}) {
@@ -71,7 +126,11 @@ function interpolate(template, params = {}) {
 }
 
 export function createI18n(options = {}) {
-  const locale = ref(normalizeLocale(options.initialLocale || detectInitialLocale()));
+  const initialLocale = normalizeLocale(options.initialLocale || detectInitialLocale());
+  const locale = ref(initialLocale);
+
+  // Begin fetching immediately; `ready()` lets bootstrap await the first paint.
+  const ready = () => loadLocaleMessages(locale.value);
 
   const translate = (key, params = {}, forcedLocale) => {
     const targetLocale = normalizeLocale(forcedLocale || locale.value);
@@ -79,8 +138,7 @@ export function createI18n(options = {}) {
     return resolved === undefined ? key : interpolate(resolved, params);
   };
 
-  const set = (nextLocale) => {
-    const normalized = normalizeLocale(nextLocale);
+  const applyLocale = (normalized) => {
     locale.value = normalized;
     writeStoredLocale(normalized);
     if (typeof document !== 'undefined') {
@@ -88,11 +146,20 @@ export function createI18n(options = {}) {
     }
   };
 
+  const set = (nextLocale) => {
+    const normalized = normalizeLocale(nextLocale);
+    // Switch immediately so the UI reacts, then fill in the bundle when the
+    // dynamic import resolves (shallowReactive triggers the re-render).
+    applyLocale(normalized);
+    return loadLocaleMessages(normalized);
+  };
+
   const instance = {
     locale,
     supportedLocales: SUPPORTED_LOCALES,
     t: translate,
     setLocale: set,
+    ready,
     install(app) {
       app.provide(I18N_KEY, instance);
       app.config.globalProperties.$t = translate;
@@ -103,17 +170,22 @@ export function createI18n(options = {}) {
     }
   };
 
+  loadLocaleMessages(initialLocale);
+
   return instance;
 }
 
 export const i18n = createI18n();
+
+/** Resolves once the initially detected locale is available. */
+export const i18nReady = i18n.ready();
 
 export function t(key, params = {}, forcedLocale) {
   return i18n.t(key, params, forcedLocale);
 }
 
 export function setLocale(locale) {
-  i18n.setLocale(locale);
+  return i18n.setLocale(locale);
 }
 
 export function useI18n() {

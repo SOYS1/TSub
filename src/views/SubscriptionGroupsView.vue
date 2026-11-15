@@ -194,8 +194,8 @@ const handlePushHistory = (id) => {
     <BulkImportModal 
         v-if="showBulkImportModal" 
         :show="showBulkImportModal" 
+        :import-handler="handleBulkImport"
         @update:show="showBulkImportModal = $event"
-        @import="(txt, tag) => handleBulkImport(txt, tag)"
     />
 
     <NodePreviewModal
