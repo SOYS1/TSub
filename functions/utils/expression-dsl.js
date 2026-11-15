@@ -4,6 +4,8 @@
  * templates, field comparisons and a small helper call grammar.
  */
 
+import { compileSafeRegex } from './safe-regex.js';
+
 const IDENTIFIER_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const STRING_RE = /^(?:'([^'\\]*(?:\\.[^'\\]*)*)'|"([^"\\]*(?:\\.[^"\\]*)*)")$/;
 const NUMBER_RE = /^-?\d+(?:\.\d+)?$/;
@@ -75,19 +77,15 @@ function safeTitle(value) {
 }
 
 function safeMatch(value, pattern, flags = 'i') {
-    try {
-        return new RegExp(String(pattern || ''), String(flags || 'i')).test(String(value || ''));
-    } catch {
-        return false;
-    }
+    const regex = compileSafeRegex(String(pattern || ''), String(flags || 'i'));
+    if (!regex) return false;
+    return regex.test(String(value || ''));
 }
 
 function safeReplace(value, pattern, replacement = '', flags = 'g') {
-    try {
-        return String(value || '').replace(new RegExp(String(pattern || ''), String(flags || 'g')), String(replacement || ''));
-    } catch {
-        return String(value || '');
-    }
+    const regex = compileSafeRegex(String(pattern || ''), String(flags || 'g'));
+    if (!regex) return String(value || '');
+    return String(value || '').replace(regex, String(replacement || ''));
 }
 
 function fallback(...values) {

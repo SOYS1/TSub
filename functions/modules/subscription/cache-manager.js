@@ -7,6 +7,44 @@ import {
 const refreshDebounce = new Map();
 const DEBOUNCE_TIME = 10000;
 
+/**
+ * `refreshDebounce` lives for the whole isolate lifetime. Without a bound it
+ * grows once per distinct cache key (tokens / profiles), which leaks memory in
+ * long-lived Workers. Entries are also stale after a few minutes because the
+ * debounce window itself is only 10s.
+ */
+export const REFRESH_DEBOUNCE_MAX_ENTRIES = 500;
+export const REFRESH_DEBOUNCE_TTL = 5 * 60 * 1000;
+
+export function pruneRefreshDebounce(now = Date.now()) {
+    for (const [key, timestamp] of refreshDebounce) {
+        if (!Number.isFinite(timestamp) || now - timestamp > REFRESH_DEBOUNCE_TTL) {
+            refreshDebounce.delete(key);
+        }
+    }
+    while (refreshDebounce.size > REFRESH_DEBOUNCE_MAX_ENTRIES) {
+        refreshDebounce.delete(refreshDebounce.keys().next().value);
+    }
+}
+
+function rememberRefresh(cacheKey, now) {
+    // Re-insert so Map iteration order stays least-recently-used first.
+    refreshDebounce.delete(cacheKey);
+    refreshDebounce.set(cacheKey, now);
+    if (refreshDebounce.size > REFRESH_DEBOUNCE_MAX_ENTRIES) {
+        pruneRefreshDebounce(now);
+    }
+}
+
+/** Test / diagnostics helpers. */
+export function getRefreshDebounceSize() {
+    return refreshDebounce.size;
+}
+
+export function clearRefreshDebounce() {
+    refreshDebounce.clear();
+}
+
 function countCachedNodes(cachedData) {
     const declaredCount = Number(cachedData?.nodeCount);
     if (Number.isFinite(declaredCount)) return declaredCount;
@@ -56,7 +94,7 @@ export async function resolveNodeListWithCache({
 
         const lastRun = refreshDebounce.get(cacheKey);
         if (!lastRun || Date.now() - lastRun > DEBOUNCE_TIME) {
-            refreshDebounce.set(cacheKey, Date.now());
+            rememberRefresh(cacheKey, Date.now());
             triggerBackgroundRefresh(context, () => refreshNodes(true));
         }
 

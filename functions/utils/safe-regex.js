@@ -187,20 +187,93 @@ export function isSafeRegexPattern(pattern) {
 }
 
 /**
+ * Bounded cache for compiled user regexes.
+ *
+ * The same handful of include / exclude / rename rules is evaluated against
+ * every node, so without a cache the validator and `new RegExp()` run tens of
+ * thousands of times per request. Keys include the effective length limit so
+ * custom callers never receive a result compiled under different limits.
+ */
+export const SAFE_REGEX_CACHE_LIMIT = 256;
+const regexCache = new Map();
+const regexCacheStats = { hits: 0, misses: 0, compilations: 0 };
+
+function cacheKeyFor(source, flags, maxLength) {
+    return `${maxLength}\u0000${flags}\u0000${source}`;
+}
+
+function readCachedRegex(key) {
+    if (!regexCache.has(key)) return { hit: false, value: null };
+    const value = regexCache.get(key);
+    // Refresh recency so the LRU eviction removes genuinely cold entries.
+    regexCache.delete(key);
+    regexCache.set(key, value);
+    regexCacheStats.hits += 1;
+    return { hit: true, value };
+}
+
+function writeCachedRegex(key, value) {
+    if (regexCache.has(key)) regexCache.delete(key);
+    regexCache.set(key, value);
+    if (regexCache.size > SAFE_REGEX_CACHE_LIMIT) {
+        regexCache.delete(regexCache.keys().next().value);
+    }
+}
+
+/**
+ * Global / sticky regexes carry mutable `lastIndex` state. Consumers use the
+ * compiled regex synchronously, so resetting before every return is enough to
+ * stop one node (or request) from inheriting another's match position.
+ */
+function prepareRegexForUse(regex) {
+    if (regex && (regex.global || regex.sticky)) regex.lastIndex = 0;
+    return regex;
+}
+
+/** Clear the compiled-regex cache and its instrumentation counters. */
+export function clearSafeRegexCache() {
+    regexCache.clear();
+    regexCacheStats.hits = 0;
+    regexCacheStats.misses = 0;
+    regexCacheStats.compilations = 0;
+}
+
+/** Cache instrumentation, primarily for tests and diagnostics. */
+export function getSafeRegexCacheStats() {
+    return { size: regexCache.size, ...regexCacheStats };
+}
+
+/**
  * Compile a single user pattern. Returns null when the pattern is invalid,
  * too long, or not provably safe.
+ *
+ * Results are memoized: repeated calls with the same source / flags / limit
+ * skip both the validator and `new RegExp()`.
  */
 export function compileSafeRegex(pattern, flags = 'i', options = {}) {
     const source = typeof pattern === 'string' ? pattern.trim() : '';
     if (!source) return null;
     const maxLength = options.maxPatternLength ?? REGEX_LIMITS.maxPatternLength;
     if (source.length > maxLength) return null;
-    if (!analyzeSafeRegex(source).safe) return null;
-    try {
-        return new RegExp(source, flags);
-    } catch {
-        return null;
+
+    const key = cacheKeyFor(source, flags, maxLength);
+    const cached = readCachedRegex(key);
+    if (cached.hit) return prepareRegexForUse(cached.value);
+
+    regexCacheStats.misses += 1;
+    regexCacheStats.compilations += 1;
+
+    let compiled = null;
+    if (analyzeSafeRegex(source).safe) {
+        try {
+            compiled = new RegExp(source, flags);
+        } catch {
+            compiled = null;
+        }
     }
+
+    writeCachedRegex(key, compiled);
+    return prepareRegexForUse(compiled);
 }
 
 /**

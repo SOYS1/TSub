@@ -42,7 +42,10 @@ function normalizeRegionOverrides(overrides = []) {
     return overrides
         .map(rule => {
             if (!rule || !rule.pattern || !rule.region) return null;
-            const pattern = compileSafeRegex(rule.pattern, rule.flags || 'i');
+            // `.test()` is stateless without g/y; stripping them avoids
+            // lastIndex leaking between nodes in the loop below.
+            const flags = String(rule.flags || 'i').replace(/[gy]/g, '');
+            const pattern = compileSafeRegex(rule.pattern, flags);
             if (!pattern) return null;
             return {
                 pattern,

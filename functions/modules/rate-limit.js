@@ -2,6 +2,42 @@ import { StorageFactory } from '../storage-adapter.js';
 
 const memoryEntries = new Map();
 
+/**
+ * Memory fallback entries are kept only while they can still affect a request.
+ * The TTL never undercuts the caller's own window (which can be a full day for
+ * guestbook limits) and the hard entry cap bounds a long-lived isolate even if
+ * every window is still active.
+ */
+export const RATE_LIMIT_MEMORY_MAX_ENTRIES = 1000;
+export const RATE_LIMIT_MEMORY_TTL = 5 * 60 * 1000;
+
+function pruneMemoryEntries(now = Date.now()) {
+    for (const [key, record] of memoryEntries) {
+        if (!record || record.expiresAt <= now) memoryEntries.delete(key);
+    }
+    while (memoryEntries.size > RATE_LIMIT_MEMORY_MAX_ENTRIES) {
+        memoryEntries.delete(memoryEntries.keys().next().value);
+    }
+}
+
+/** Remove expired entries; safe to call from scheduled maintenance. */
+export function pruneRateLimitMemory(now = Date.now()) {
+    pruneMemoryEntries(now);
+}
+
+/** Test / diagnostics helpers. */
+export function getRateLimitMemorySize() {
+    return memoryEntries.size;
+}
+
+export function hasRateLimitMemoryEntry(key) {
+    return memoryEntries.has(key);
+}
+
+export function clearRateLimitMemory() {
+    memoryEntries.clear();
+}
+
 function bytesToHex(bytes) {
     return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }
@@ -39,17 +75,33 @@ async function readEntry(adapter, key) {
     if (adapter) {
         try { return await adapter.get(key); } catch { /* memory fallback */ }
     }
-    return memoryEntries.get(key) || null;
+    const record = memoryEntries.get(key);
+    if (!record) return null;
+    if (!record.expiresAt || record.expiresAt <= Date.now()) {
+        memoryEntries.delete(key);
+        return null;
+    }
+    return record.entry || null;
 }
 
-async function writeEntry(adapter, key, entry) {
+async function writeEntry(adapter, key, entry, options = {}) {
     if (adapter) {
         try {
             await adapter.put(key, entry);
             return;
         } catch { /* memory fallback */ }
     }
-    memoryEntries.set(key, entry);
+    const now = Number(options.now) || Date.now();
+    const windowMs = Math.max(0, Number(options.windowMs) || 0);
+    const blockMs = Math.max(0, Number(options.blockMs) || 0);
+    const ttl = Math.max(RATE_LIMIT_MEMORY_TTL, windowMs, blockMs);
+    memoryEntries.delete(key);
+    memoryEntries.set(key, { entry, expiresAt: now + ttl });
+    // Only pay for a sweep once the map is actually over budget; normal writes
+    // stay O(1).
+    if (memoryEntries.size > RATE_LIMIT_MEMORY_MAX_ENTRIES) {
+        pruneMemoryEntries(now);
+    }
 }
 
 export async function inspectRateLimit(request, env, options) {
@@ -76,7 +128,11 @@ export async function recordRateLimitFailure(state, options) {
     const entry = normalizeEntry(state.entry, state.now, options.windowMs);
     entry.count += 1;
     if (entry.count >= options.limit) entry.blockedUntil = state.now + (options.blockMs || options.windowMs);
-    await writeEntry(state.adapter, state.key, entry);
+    await writeEntry(state.adapter, state.key, entry, {
+        now: state.now,
+        windowMs: options.windowMs,
+        blockMs: options.blockMs
+    });
     return entry;
 }
 
